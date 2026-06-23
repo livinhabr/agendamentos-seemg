@@ -8,10 +8,13 @@ import {
   getChatFieldsByBot,
   getFaqsByBot,
   getServicesBySector,
+  getCanalWidgetByBot,
 } from "@/lib/data/agenda";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot as BotIcon, User } from "lucide-react";
+import { Bot as BotIcon, User, Loader2 } from "lucide-react";
+import { sendChatMessage } from "@/lib/api/backend";
+import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/chat-agendamento")({
   head: () => ({ meta: [{ title: "Chat de Agendamento — Agenda SEE-MG" }] }),
@@ -196,40 +199,74 @@ function CamposTab() {
 
 type Msg = { role: "bot" | "user"; text: string };
 function PreviewTab() {
-  const { selectedSectorId, selectedBotId, bots } = useSector();
+  const { selectedSectorId, selectedBotId, sectors, bots } = useSector();
+  const sector = sectors.find((s) => s.id === selectedSectorId);
   const bot = bots.find((b) => b.id === selectedBotId);
-  const [servicos, setServicos] = useState<any[]>([]);
-  const [faqs, setFaqs] = useState<any[]>([]);
+  const [canal, setCanal] = useState<any>(null);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [sessionUser, setSessionUser] = useState<any>(null);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setSessionUser(data.user));
+  }, []);
 
   useEffect(() => {
     if (!selectedSectorId || !selectedBotId) return;
-    Promise.all([
-      getServicesBySector([selectedSectorId]),
-      getFaqsByBot([selectedBotId]),
-    ]).then(([s, f]) => {
-      setServicos(s.data);
-      setFaqs(f.data);
+    
+    getCanalWidgetByBot([selectedBotId]).then((res) => {
+      const activeCanal = res.data?.find((c: any) => c.ativo);
+      setCanal(activeCanal);
       setMsgs([{ role: "bot", text: bot?.saudacao_inicial ?? "Olá! Como posso ajudar com seu agendamento hoje?" }]);
     });
   }, [selectedBotId, selectedSectorId, bot?.saudacao_inicial]);
 
-  function send() {
-    if (!input.trim()) return;
-    const lower = input.toLowerCase();
-    const faq = faqs.find(
-      (f) => f.pergunta?.toLowerCase().includes(lower) || (f.palavras_chave ?? "").toLowerCase().includes(lower),
-    );
-    let resposta = bot?.mensagem_fora_escopo ?? "Não entendi. Pode reformular?";
-    if (faq) resposta = faq.resposta;
-    else if (lower.includes("servic") || lower.includes("agendar")) {
-      resposta = servicos.length === 0
-        ? "Ainda não há serviços cadastrados."
-        : "Serviços disponíveis:\n• " + servicos.map((s) => s.nome).join("\n• ");
-    }
-    setMsgs((m) => [...m, { role: "user", text: input }, { role: "bot", text: resposta }]);
+  async function send() {
+    if (!input.trim() || !sector || !bot || !canal || loading) return;
+    const userMsg = input.trim();
     setInput("");
+    setErrorMsg("");
+    setMsgs((m) => [...m, { role: "user", text: userMsg }]);
+    setLoading(true);
+
+    let sessionId = localStorage.getItem("agenda_preview_session_id");
+    if (!sessionId) {
+      sessionId = crypto.randomUUID();
+      localStorage.setItem("agenda_preview_session_id", sessionId);
+    }
+
+    try {
+      const payload = {
+        setor_slug: sector.slug,
+        bot_slug: bot.slug,
+        canal_id: canal.id,
+        session_id: sessionId,
+        message: userMsg,
+        user: sessionUser ? {
+          name: sessionUser.user_metadata?.full_name ?? sessionUser.email?.split("@")[0],
+          email: sessionUser.email
+        } : undefined
+      };
+
+      const result = await sendChatMessage(payload);
+      setMsgs((m) => [...m, { role: "bot", text: result.reply }]);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Erro desconhecido ao enviar mensagem.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!canal) {
+    return (
+      <Section title="Simulação do chat (somente local)">
+        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          Configure ou publique um canal de widget antes de testar o chat.
+        </div>
+      </Section>
+    );
   }
 
   return (
@@ -246,6 +283,19 @@ function PreviewTab() {
               </div>
             </div>
           ))}
+          {loading && (
+            <div className="flex gap-2">
+              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-muted">
+                <BotIcon className="h-3.5 w-3.5" />
+              </div>
+              <div className="flex items-center gap-2 max-w-[80%] whitespace-pre-line rounded-lg px-3 py-2 text-sm bg-muted text-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Enviando...
+              </div>
+            </div>
+          )}
+          {errorMsg && (
+            <div className="text-center text-xs text-destructive mt-2">{errorMsg}</div>
+          )}
         </div>
         <form className="flex gap-2 border-t border-border p-3" onSubmit={(e) => { e.preventDefault(); send(); }}>
           <input
@@ -253,8 +303,9 @@ function PreviewTab() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Digite uma mensagem..."
+            disabled={loading}
           />
-          <Button type="submit">Enviar</Button>
+          <Button type="submit" disabled={loading || !input.trim()}>Enviar</Button>
         </form>
       </div>
     </Section>

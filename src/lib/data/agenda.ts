@@ -134,6 +134,15 @@ export async function getChatFieldsByBot(botIds: string[]) {
   return { data: data ?? [], error: toErr(error) };
 }
 
+export async function getCanalWidgetByBot(botIds: string[]) {
+  if (botIds.length === 0) return { data: [], error: null };
+  const { data, error } = await db
+    .from("canais_widget")
+    .select("*")
+    .in("bot_id", botIds);
+  return { data: data ?? [], error: toErr(error) };
+}
+
 export async function getCalendarsBySector(setorIds: string[]) {
   if (setorIds.length === 0) return { data: [], error: null };
   const { data, error } = await db
