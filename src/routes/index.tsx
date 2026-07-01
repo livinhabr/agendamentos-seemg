@@ -109,7 +109,7 @@ function Index() {
     setOauthLoading(true);
 
     const provider = "google" as const;
-    const redirectTo = window.location.origin;
+    const redirectTo = window.location.origin + "/";
     setDebug({ provider, redirectTo });
 
     try {
