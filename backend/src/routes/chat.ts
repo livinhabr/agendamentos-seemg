@@ -19,15 +19,34 @@ const MOCK_REPLY = "Recebi sua mensagem. Em breve este chat será conectado ao f
 const N8N_FALLBACK_REPLY = "Recebi sua mensagem, mas ainda não consegui gerar uma resposta do fluxo de atendimento.";
 const N8N_ERROR_REPLY = "Não consegui conectar ao fluxo de atendimento neste momento. Tente novamente em instantes.";
 
+/** Helper: run a supplementary Supabase query; on failure log safely and return []. */
+async function safeQuery<T>(
+  label: string,
+  queryFn: () => PromiseLike<{ data: T[] | null; error: any }>,
+  logger: FastifyInstance["log"],
+): Promise<T[]> {
+  try {
+    const { data, error } = await queryFn();
+    if (error) {
+      logger.warn({ context_query: label, code: error.code }, "Context query returned error – sending empty array");
+      return [];
+    }
+    return data ?? [];
+  } catch (err: any) {
+    logger.warn({ context_query: label, err: err.message }, "Context query threw – sending empty array");
+    return [];
+  }
+}
+
 export default async function chatRoutes(fastify: FastifyInstance) {
   fastify.post("/api/chat", async (request, reply) => {
     try {
       const body = chatSchema.parse(request.body);
 
-      // Verify existence of sector
+      // ── Validate setor (with extra fields for context) ──────────
       const { data: setor, error: errSetor } = await supabaseAdmin
         .from('setores')
-        .select('id')
+        .select('id, nome, slug')
         .eq('slug', body.setor_slug)
         .eq('ativo', true)
         .single();
@@ -36,10 +55,10 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         return reply.status(400).send({ error: "Setor não encontrado ou inativo" });
       }
 
-      // Check bot
+      // ── Validate bot (with extra fields for context) ────────────
       const { data: bot, error: errBot } = await supabaseAdmin
         .from('bots_agendamento')
-        .select('id')
+        .select('id, nome, slug, saudacao_inicial, tom_de_voz, mensagem_fora_escopo, instrucoes_especificas')
         .eq('slug', body.bot_slug)
         .eq('setor_id', setor.id)
         .eq('ativo', true)
@@ -49,10 +68,10 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         return reply.status(400).send({ error: "Bot não encontrado ou inativo para este setor" });
       }
       
-      // Check canal
+      // ── Validate canal ──────────────────────────────────────────
       const { data: canal, error: errCanal } = await supabaseAdmin
         .from('canais_widget')
-        .select('*')
+        .select('id, nome')
         .eq('id', body.canal_id)
         .eq('bot_id', bot.id)
         .eq('ativo', true)
@@ -63,9 +82,56 @@ export default async function chatRoutes(fastify: FastifyInstance) {
       }
 
       // Se permitido_embedar existir no banco, validar também
-      if ('permitido_embedar' in canal && canal.permitido_embedar === false) {
+      if ('permitido_embedar' in canal && (canal as any).permitido_embedar === false) {
         return reply.status(400).send({ error: "Canal do widget não encontrado, inativo ou não permitido" });
       }
+
+      // ── Fetch supplementary context (safe – never breaks the route) ──
+      const [servicos, perguntas_respostas, campos_chat, atendentes] = await Promise.all([
+        // 1. Serviços ativos do bot/setor
+        safeQuery("servicos_agendamento", () =>
+          supabaseAdmin
+            .from("servicos_agendamento")
+            .select("id, nome, categoria, descricao_curta, descricao_para_usuario, duracao_minutos, local_atendimento, instrucoes_confirmacao, ordem")
+            .eq("setor_id", setor.id)
+            .eq("bot_id", bot.id)
+            .eq("ativo", true)
+            .order("ordem", { ascending: true }),
+          fastify.log,
+        ),
+
+        // 2. Perguntas frequentes ativas
+        safeQuery("perguntas_respostas", () =>
+          supabaseAdmin
+            .from("perguntas_respostas")
+            .select("id, categoria, pergunta, resposta, palavras_chave, ordem")
+            .eq("bot_id", bot.id)
+            .eq("ativo", true)
+            .order("ordem", { ascending: true }),
+          fastify.log,
+        ),
+
+        // 3. Campos ativos do chat
+        safeQuery("campos_formulario_chat", () =>
+          supabaseAdmin
+            .from("campos_formulario_chat")
+            .select("id, nome_campo, rotulo, tipo_campo, obrigatorio, opcoes_json, ordem")
+            .eq("bot_id", bot.id)
+            .eq("ativo", true)
+            .order("ordem", { ascending: true }),
+          fastify.log,
+        ),
+
+        // 4. Atendentes ativos do setor
+        safeQuery("atendentes", () =>
+          supabaseAdmin
+            .from("atendentes")
+            .select("id, nome, email, cargo")
+            .eq("setor_id", setor.id)
+            .eq("ativo", true),
+          fastify.log,
+        ),
+      ]);
 
       // ── n8n integration (conditional) ──────────────────────────────
       // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
@@ -87,9 +153,28 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         message: body.message,
         user: body.user,
         context: {
-          setor_id: setor.id,
-          bot_id: bot.id,
-          canal_id: canal.id,
+          setor: {
+            id: setor.id,
+            nome: setor.nome,
+            slug: setor.slug,
+          },
+          bot: {
+            id: bot.id,
+            nome: bot.nome,
+            slug: bot.slug,
+            saudacao_inicial: bot.saudacao_inicial,
+            tom_de_voz: bot.tom_de_voz,
+            mensagem_fora_escopo: bot.mensagem_fora_escopo,
+            instrucoes_especificas: bot.instrucoes_especificas,
+          },
+          canal: {
+            id: canal.id,
+            nome: canal.nome,
+          },
+          servicos,
+          perguntas_respostas,
+          campos_chat,
+          atendentes,
         },
         request_meta: {
           origin: request.headers.origin || null,
@@ -157,3 +242,4 @@ export default async function chatRoutes(fastify: FastifyInstance) {
     }
   });
 }
+
