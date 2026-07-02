@@ -225,13 +225,13 @@ export default async function chatRoutes(fastify: FastifyInstance) {
 
       // ── Fetch supplementary context (safe – never breaks the route) ──
       const [servicos, perguntas_respostas, campos_chat, atendentes] = await Promise.all([
-        // 1. Serviços ativos do bot/setor
+        // 1. Serviços ativos do setor (vinculados ao bot atual ou sem vínculo de bot)
         safeQuery("servicos_agendamento", () =>
           supabaseAdmin
             .from("servicos_agendamento")
             .select("id, nome, categoria, descricao_curta, descricao_para_usuario, duracao_minutos, local_atendimento, instrucoes_confirmacao, ordem")
             .eq("setor_id", setor.id)
-            .eq("bot_id", bot.id)
+            .or(`bot_id.eq.${bot.id},bot_id.is.null`)
             .eq("ativo", true)
             .order("ordem", { ascending: true }),
           fastify.log,
