@@ -42,6 +42,8 @@ async function safeQuery<T>(
 
 interface ConversaRecord {
   id: string;
+  status: string;
+  estado_json: Record<string, unknown>;
 }
 
 interface MensagemRecord {
@@ -52,7 +54,7 @@ interface MensagemRecord {
 
 /**
  * Find an existing open conversation for the given session/bot/canal combo,
- * or create a new one. Returns the conversation id, or null on failure.
+ * or create a new one. Returns the conversation record, or null on failure.
  */
 async function findOrCreateConversa(
   sessionId: string,
@@ -61,12 +63,12 @@ async function findOrCreateConversa(
   userName: string | undefined,
   userEmail: string | undefined,
   logger: FastifyInstance["log"],
-): Promise<string | null> {
+): Promise<ConversaRecord | null> {
   try {
     // Try to find an existing open conversation
     const { data: existing, error: findErr } = await supabaseAdmin
       .from("conversas_chat")
-      .select("id")
+      .select("id, status, estado_json")
       .eq("external_user_id", sessionId)
       .eq("bot_id", botId)
       .eq("canal_widget_id", canalId)
@@ -80,7 +82,7 @@ async function findOrCreateConversa(
     }
 
     if (existing) {
-      return existing.id;
+      return existing as ConversaRecord;
     }
 
     // Create a new conversation
@@ -94,8 +96,9 @@ async function findOrCreateConversa(
         email_usuario: userEmail ?? null,
         status: "aberta",
         contexto_json: {},
+        estado_json: {},
       })
-      .select("id")
+      .select("id, status, estado_json")
       .single();
 
     if (createErr || !created) {
@@ -104,7 +107,7 @@ async function findOrCreateConversa(
     }
 
     logger.info({ conversa_id: created.id }, "New conversation created");
-    return created.id;
+    return created as ConversaRecord;
   } catch (err: any) {
     logger.warn({ op: "find_or_create_conversa", err: err.message }, "Conversation persistence threw");
     return null;
@@ -137,6 +140,29 @@ async function saveMessage(
     }
   } catch (err: any) {
     logger.warn({ op: "save_message", papel, err: err.message }, "Save message threw");
+  }
+}
+
+/**
+ * Save conversation state (estado_json) after n8n returns a new state.
+ * Fails silently — never breaks the chat flow.
+ */
+async function saveConversationState(
+  conversaId: string,
+  state: Record<string, unknown>,
+  logger: FastifyInstance["log"],
+): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin
+      .from("conversas_chat")
+      .update({ estado_json: state, updated_at: new Date().toISOString() })
+      .eq("id", conversaId);
+
+    if (error) {
+      logger.warn({ op: "save_state", code: error.code }, "Failed to save conversation state");
+    }
+  } catch (err: any) {
+    logger.warn({ op: "save_state", err: err.message }, "Save conversation state threw");
   }
 }
 
@@ -271,7 +297,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
       ]);
 
       // ── Conversation persistence (resilient) ───────────────────────
-      const conversaId = await findOrCreateConversa(
+      const conversa = await findOrCreateConversa(
         body.session_id,
         bot.id,
         body.canal_id,
@@ -279,6 +305,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         body.user?.email,
         fastify.log,
       );
+      const conversaId = conversa?.id ?? null;
 
       // Save user message (fire-and-forget-safe: awaited but failures are swallowed)
       if (conversaId) {
@@ -310,6 +337,12 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         message: body.message,
         user: body.user,
         history,
+        conversation: {
+          id: conversaId,
+          session_id: body.session_id,
+          status: conversa?.status ?? "aberta",
+          state: conversa?.estado_json ?? {},
+        },
         context: {
           setor: {
             id: setor.id,
@@ -378,6 +411,12 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         // Save assistant reply (resilient)
         if (conversaId) {
           await saveMessage(conversaId, "assistente", replyText as string, {}, fastify.log);
+        }
+
+        // Persist conversation state returned by n8n (resilient)
+        const newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
+        if (conversaId && newState && typeof newState === "object" && !Array.isArray(newState)) {
+          await saveConversationState(conversaId, newState, fastify.log);
         }
 
         return {
