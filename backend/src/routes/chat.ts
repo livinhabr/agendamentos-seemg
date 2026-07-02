@@ -38,6 +38,143 @@ async function safeQuery<T>(
   }
 }
 
+// ── Conversation persistence helpers ─────────────────────────────────────
+
+interface ConversaRecord {
+  id: string;
+}
+
+interface MensagemRecord {
+  papel: string;
+  conteudo: string;
+  created_at: string;
+}
+
+/**
+ * Find an existing open conversation for the given session/bot/canal combo,
+ * or create a new one. Returns the conversation id, or null on failure.
+ */
+async function findOrCreateConversa(
+  sessionId: string,
+  botId: string,
+  canalId: string,
+  userName: string | undefined,
+  userEmail: string | undefined,
+  logger: FastifyInstance["log"],
+): Promise<string | null> {
+  try {
+    // Try to find an existing open conversation
+    const { data: existing, error: findErr } = await supabaseAdmin
+      .from("conversas_chat")
+      .select("id")
+      .eq("external_user_id", sessionId)
+      .eq("bot_id", botId)
+      .eq("canal_widget_id", canalId)
+      .eq("status", "aberta")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (findErr) {
+      logger.warn({ op: "find_conversa", code: findErr.code }, "Failed to find existing conversation");
+    }
+
+    if (existing) {
+      return existing.id;
+    }
+
+    // Create a new conversation
+    const { data: created, error: createErr } = await supabaseAdmin
+      .from("conversas_chat")
+      .insert({
+        bot_id: botId,
+        canal_widget_id: canalId,
+        external_user_id: sessionId,
+        nome_usuario: userName ?? null,
+        email_usuario: userEmail ?? null,
+        status: "aberta",
+        contexto_json: {},
+      })
+      .select("id")
+      .single();
+
+    if (createErr || !created) {
+      logger.warn({ op: "create_conversa", code: createErr?.code }, "Failed to create conversation");
+      return null;
+    }
+
+    logger.info({ conversa_id: created.id }, "New conversation created");
+    return created.id;
+  } catch (err: any) {
+    logger.warn({ op: "find_or_create_conversa", err: err.message }, "Conversation persistence threw");
+    return null;
+  }
+}
+
+/**
+ * Save a single message to mensagens_chat.
+ * Fails silently — never breaks the chat flow.
+ */
+async function saveMessage(
+  conversaId: string,
+  papel: "usuario" | "assistente",
+  conteudo: string,
+  metadados: Record<string, unknown>,
+  logger: FastifyInstance["log"],
+): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin
+      .from("mensagens_chat")
+      .insert({
+        conversa_id: conversaId,
+        papel,
+        conteudo,
+        metadados,
+      });
+
+    if (error) {
+      logger.warn({ op: "save_message", papel, code: error.code }, "Failed to save message");
+    }
+  } catch (err: any) {
+    logger.warn({ op: "save_message", papel, err: err.message }, "Save message threw");
+  }
+}
+
+/**
+ * Fetch the last N messages for a conversation, oldest-first.
+ */
+async function fetchHistory(
+  conversaId: string,
+  limit: number,
+  logger: FastifyInstance["log"],
+): Promise<{ role: "user" | "assistant"; content: string; created_at: string }[]> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("mensagens_chat")
+      .select("papel, conteudo, created_at")
+      .eq("conversa_id", conversaId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      logger.warn({ op: "fetch_history", code: error.code }, "Failed to fetch message history");
+      return [];
+    }
+
+    // Reverse to oldest-first and map papel → role
+    return (data ?? []).reverse().map((m: MensagemRecord) => ({
+      role: m.papel === "usuario" ? "user" as const : "assistant" as const,
+      content: m.conteudo,
+      created_at: m.created_at,
+    }));
+  } catch (err: any) {
+    logger.warn({ op: "fetch_history", err: err.message }, "Fetch history threw");
+    return [];
+  }
+}
+
+// ── Route ────────────────────────────────────────────────────────────────
+
 export default async function chatRoutes(fastify: FastifyInstance) {
   fastify.post("/api/chat", async (request, reply) => {
     try {
@@ -133,12 +270,32 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         ),
       ]);
 
+      // ── Conversation persistence (resilient) ───────────────────────
+      const conversaId = await findOrCreateConversa(
+        body.session_id,
+        bot.id,
+        body.canal_id,
+        body.user?.name,
+        body.user?.email,
+        fastify.log,
+      );
+
+      // Save user message (fire-and-forget-safe: awaited but failures are swallowed)
+      if (conversaId) {
+        await saveMessage(conversaId, "usuario", body.message, {}, fastify.log);
+      }
+
+      // Fetch conversation history for n8n context
+      const history = conversaId
+        ? await fetchHistory(conversaId, 10, fastify.log)
+        : [];
+
       // ── n8n integration (conditional) ──────────────────────────────
       // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
       if (!env.N8N_CHAT_WEBHOOK_URL) {
         return {
           reply: MOCK_REPLY,
-          conversation_id: body.session_id,
+          conversation_id: conversaId ?? body.session_id,
           status: "ok"
         };
       }
@@ -152,6 +309,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         session_id: body.session_id,
         message: body.message,
         user: body.user,
+        history,
         context: {
           setor: {
             id: setor.id,
@@ -205,7 +363,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
           fastify.log.error({ status: n8nResponse.status }, "n8n returned non-OK status");
           return reply.status(502).send({
             reply: N8N_ERROR_REPLY,
-            conversation_id: body.session_id,
+            conversation_id: conversaId ?? body.session_id,
             status: "error",
           });
         }
@@ -217,9 +375,14 @@ export default async function chatRoutes(fastify: FastifyInstance) {
           ? n8nData.reply
           : N8N_FALLBACK_REPLY;
 
+        // Save assistant reply (resilient)
+        if (conversaId) {
+          await saveMessage(conversaId, "assistente", replyText as string, {}, fastify.log);
+        }
+
         return {
           reply: replyText,
-          conversation_id: (n8nData.conversation_id as string) || body.session_id,
+          conversation_id: conversaId ?? body.session_id,
           status: "ok",
         };
 
@@ -228,7 +391,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         fastify.log.error({ err: n8nErr.message }, "n8n webhook call failed");
         return reply.status(502).send({
           reply: N8N_ERROR_REPLY,
-          conversation_id: body.session_id,
+          conversation_id: conversaId ?? body.session_id,
           status: "error",
         });
       }
@@ -242,4 +405,5 @@ export default async function chatRoutes(fastify: FastifyInstance) {
     }
   });
 }
+
 
