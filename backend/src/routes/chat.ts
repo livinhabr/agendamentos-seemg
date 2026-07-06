@@ -255,7 +255,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         safeQuery("servicos_agendamento", () =>
           supabaseAdmin
             .from("servicos_agendamento")
-            .select("id, nome, categoria, descricao_curta, descricao_para_usuario, duracao_minutos, local_atendimento, instrucoes_confirmacao, ordem")
+            .select("id, nome, categoria, descricao_curta, descricao_para_usuario, duracao_minutos, local_atendimento, instrucoes_confirmacao, ordem, servico_pai_id, tipo")
             .eq("setor_id", setor.id)
             .or(`bot_id.eq.${bot.id},bot_id.is.null`)
             .eq("ativo", true)

@@ -56,8 +56,33 @@ function ServicosTab() {
     () => getServicesBySector(selectedSectorId ? [selectedSectorId] : []),
     [selectedSectorId],
   );
+
+  // Build parent options: services that can act as parents (tipo = 'menu' or top-level without pai)
+  const parentOptions = data
+    .filter((s: any) => s.tipo === "menu" || (!s.servico_pai_id && !s.tipo))
+    .map((s: any) => ({ value: s.id, label: s.nome }));
+
   const fields: FieldDef[] = [
     { name: "nome", label: "Nome do serviço", required: true },
+    {
+      name: "tipo",
+      label: "Tipo",
+      type: "select",
+      required: true,
+      options: [
+        { value: "servico", label: "Serviço (agendável)" },
+        { value: "menu", label: "Menu (agrupa subserviços)" },
+      ],
+      defaultValue: "servico",
+      hint: "Menu = agrupa subserviços sem permitir agendamento direto. Serviço = permite agendamento.",
+    },
+    {
+      name: "servico_pai_id",
+      label: "Serviço principal (pai)",
+      type: "select",
+      options: parentOptions,
+      hint: "Deixe vazio para exibir no menu inicial. Selecione um pai para tornar subserviço.",
+    },
     { name: "categoria", label: "Categoria" },
     { name: "descricao_curta", label: "Descrição curta", type: "textarea" },
     { name: "descricao_para_usuario", label: "Descrição para o usuário", type: "textarea" },
@@ -82,7 +107,25 @@ function ServicosTab() {
         table="servicos_agendamento"
         rows={data}
         columns={[
-          { key: "nome", label: "Nome" },
+          { key: "nome", label: "Nome", render: (r) => {
+            const isChild = !!r.servico_pai_id;
+            return (
+              <span className={isChild ? "pl-4 text-muted-foreground" : "font-medium"}>
+                {isChild && <span className="mr-1 text-xs">↳</span>}
+                {r.nome}
+              </span>
+            );
+          }},
+          { key: "tipo", label: "Tipo", render: (r) => (
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${r.tipo === "menu" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}>
+              {r.tipo === "menu" ? "Menu" : "Serviço"}
+            </span>
+          )},
+          { key: "servico_pai_id", label: "Pai", render: (r) => {
+            if (!r.servico_pai_id) return "—";
+            const pai = data.find((s: any) => s.id === r.servico_pai_id);
+            return pai ? pai.nome : "—";
+          }},
           { key: "categoria", label: "Categoria" },
           { key: "duracao_minutos", label: "Duração" },
         ]}
@@ -90,6 +133,13 @@ function ServicosTab() {
         loading={loading}
         error={error}
         baseRow={{ setor_id: selectedSectorId }}
+        validate={(row) => {
+          // Clear servico_pai_id if empty string (select returns "")
+          if (row.servico_pai_id === "") row.servico_pai_id = null;
+          // Default tipo if somehow empty
+          if (!row.tipo) row.tipo = "servico";
+          return null;
+        }}
         onChanged={reload}
       />
     </Section>
