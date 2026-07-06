@@ -9,10 +9,12 @@ import {
   getFaqsByBot,
   getServicesBySector,
   getCanalWidgetByBot,
+  upsertRow,
+  deleteRow,
 } from "@/lib/data/agenda";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot as BotIcon, User, Loader2 } from "lucide-react";
+import { Bot as BotIcon, User, Loader2, Pencil, Trash2, Plus, FolderOpen, ChevronRight, Calendar } from "lucide-react";
 import { sendChatMessage } from "@/lib/api/backend";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -56,93 +58,519 @@ function ServicosTab() {
     () => getServicesBySector(selectedSectorId ? [selectedSectorId] : []),
     [selectedSectorId],
   );
+  const [editing, setEditing] = useState<Record<string, any> | null>(null);
 
-  // Build parent options: services that can act as parents (tipo = 'menu' or top-level without pai)
-  const parentOptions = data
-    .filter((s: any) => s.tipo === "menu" || (!s.servico_pai_id && !s.tipo))
-    .map((s: any) => ({ value: s.id, label: s.nome }));
+  // Organize data hierarchically: top-level first, then children grouped under parents
+  const topLevel = data.filter((s: any) => !s.servico_pai_id);
+  const childrenOf = (parentId: string) =>
+    data.filter((s: any) => s.servico_pai_id === parentId);
 
-  const fields: FieldDef[] = [
-    { name: "nome", label: "Nome do serviço", required: true },
-    {
-      name: "tipo",
-      label: "Tipo",
-      type: "select",
-      required: true,
-      options: [
-        { value: "servico", label: "Serviço (agendável)" },
-        { value: "menu", label: "Menu (agrupa subserviços)" },
-      ],
-      defaultValue: "servico",
-      hint: "Menu = agrupa subserviços sem permitir agendamento direto. Serviço = permite agendamento.",
-    },
-    {
-      name: "servico_pai_id",
-      label: "Serviço principal (pai)",
-      type: "select",
-      options: parentOptions,
-      hint: "Deixe vazio para exibir no menu inicial. Selecione um pai para tornar subserviço.",
-    },
-    { name: "categoria", label: "Categoria" },
-    { name: "descricao_curta", label: "Descrição curta", type: "textarea" },
-    { name: "descricao_para_usuario", label: "Descrição para o usuário", type: "textarea" },
-    { name: "duracao_minutos", label: "Duração (minutos)", type: "number", defaultValue: 30 },
-    { name: "intervalo_slots_minutos", label: "Intervalo de slots (min)", type: "number", defaultValue: 30 },
-    { name: "antecedencia_minima_horas", label: "Antecedência mínima (h)", type: "number", defaultValue: 1 },
-    { name: "antecedencia_maxima_dias", label: "Antecedência máxima (dias)", type: "number", defaultValue: 60 },
-    { name: "local_atendimento", label: "Local de atendimento" },
-    {
-      name: "instrucoes_confirmacao",
-      label: "Documentos necessários / Instruções",
-      type: "textarea",
-      hint: "Liste os documentos e orientações que o usuário deve trazer.",
-    },
-    { name: "ordem", label: "Ordem", type: "number", defaultValue: 0 },
-    { name: "ativo", label: "Ativo", type: "checkbox", defaultValue: true },
-  ];
+  // Build ordered rows: parent, then its children, then next parent...
+  const orderedRows: any[] = [];
+  for (const parent of topLevel) {
+    orderedRows.push(parent);
+    if (parent.tipo === "menu") {
+      for (const child of childrenOf(parent.id)) {
+        orderedRows.push(child);
+      }
+    }
+  }
+  // Also include any orphaned children (parent deleted or mismatched)
+  const listedIds = new Set(orderedRows.map((r) => r.id));
+  for (const row of data) {
+    if (!listedIds.has(row.id)) orderedRows.push(row);
+  }
+
+  function startCreate(tipo: "menu" | "servico", parentId?: string) {
+    setEditing({
+      setor_id: selectedSectorId,
+      tipo,
+      servico_pai_id: parentId ?? null,
+      nome: "",
+      categoria: "",
+      descricao_curta: "",
+      descricao_para_usuario: "",
+      duracao_minutos: 30,
+      intervalo_slots_minutos: 30,
+      antecedencia_minima_horas: 1,
+      antecedencia_maxima_dias: 60,
+      local_atendimento: "",
+      instrucoes_confirmacao: "",
+      ordem: 0,
+      ativo: true,
+    });
+  }
+
   return (
     <Section>
-      <CrudTable
-        title="Serviços oferecidos"
-        table="servicos_agendamento"
-        rows={data}
-        columns={[
-          { key: "nome", label: "Nome", render: (r) => {
-            const isChild = !!r.servico_pai_id;
-            return (
-              <span className={isChild ? "pl-4 text-muted-foreground" : "font-medium"}>
-                {isChild && <span className="mr-1 text-xs">↳</span>}
-                {r.nome}
-              </span>
-            );
-          }},
-          { key: "tipo", label: "Tipo", render: (r) => (
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${r.tipo === "menu" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}>
-              {r.tipo === "menu" ? "Menu" : "Serviço"}
-            </span>
-          )},
-          { key: "servico_pai_id", label: "Pai", render: (r) => {
-            if (!r.servico_pai_id) return "—";
-            const pai = data.find((s: any) => s.id === r.servico_pai_id);
-            return pai ? pai.nome : "—";
-          }},
-          { key: "categoria", label: "Categoria" },
-          { key: "duracao_minutos", label: "Duração" },
-        ]}
-        fields={fields}
-        loading={loading}
-        error={error}
-        baseRow={{ setor_id: selectedSectorId }}
-        validate={(row) => {
-          // Clear servico_pai_id if empty string (select returns "")
-          if (row.servico_pai_id === "") row.servico_pai_id = null;
-          // Default tipo if somehow empty
-          if (!row.tipo) row.tipo = "servico";
-          return null;
-        }}
-        onChanged={reload}
-      />
+      <div className="space-y-4">
+        {/* Header with split create buttons */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Serviços oferecidos</h2>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => startCreate("menu")} className="gap-1">
+              <FolderOpen className="h-3.5 w-3.5" /> Novo menu
+            </Button>
+            <Button size="sm" onClick={() => startCreate("servico")} className="gap-1">
+              <Calendar className="h-3.5 w-3.5" /> Novo serviço
+            </Button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            <p className="font-medium">Não foi possível carregar os dados.</p>
+          </div>
+        )}
+
+        {/* Hierarchical table */}
+        <div className="overflow-x-auto rounded-lg border border-border bg-card">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">Nome</th>
+                <th className="px-3 py-2 font-medium">Tipo</th>
+                <th className="px-3 py-2 font-medium">Duração</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center">
+                    <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
+                  </td>
+                </tr>
+              ) : orderedRows.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center text-xs text-muted-foreground">
+                    Nenhum serviço cadastrado. Comece criando um menu ou serviço.
+                  </td>
+                </tr>
+              ) : (
+                orderedRows.map((row) => {
+                  const isChild = !!row.servico_pai_id;
+                  const isMenu = row.tipo === "menu";
+                  const children = isMenu ? childrenOf(row.id) : [];
+                  return (
+                    <tr key={row.id} className={`border-t border-border ${isChild ? "bg-muted/20" : ""}`}>
+                      {/* Name column with hierarchy indentation */}
+                      <td className="px-3 py-2 align-top">
+                        <div className={`flex items-center gap-1.5 ${isChild ? "pl-6" : ""}`}>
+                          {isChild && (
+                            <span className="text-xs text-muted-foreground">└─</span>
+                          )}
+                          {isMenu && !isChild && (
+                            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                          )}
+                          {!isMenu && !isChild && (
+                            <Calendar className="h-3.5 w-3.5 shrink-0 text-green-600" />
+                          )}
+                          <span className={isChild ? "text-muted-foreground" : "font-medium"}>
+                            {row.nome}
+                          </span>
+                          {isMenu && children.length > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">
+                              ({children.length} sub)
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Type badge */}
+                      <td className="px-3 py-2 align-top">
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                          isMenu
+                            ? "bg-blue-50 text-blue-700 border border-blue-200"
+                            : "bg-green-50 text-green-700 border border-green-200"
+                        }`}>
+                          {isMenu ? "Menu" : "Serviço"}
+                        </span>
+                      </td>
+
+                      {/* Duration */}
+                      <td className="px-3 py-2 align-top text-muted-foreground">
+                        {isMenu ? "—" : `${row.duracao_minutos ?? 30} min`}
+                      </td>
+
+                      {/* Active status */}
+                      <td className="px-3 py-2 align-top">
+                        <span className={`text-xs ${row.ativo ? "text-green-600" : "text-red-500"}`}>
+                          {row.ativo ? "Ativo" : "Inativo"}
+                        </span>
+                      </td>
+
+                      {/* Actions */}
+                      <td className="px-3 py-2 text-right align-top">
+                        <div className="flex items-center justify-end gap-1">
+                          {isMenu && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="gap-1 text-xs text-blue-600 hover:text-blue-700"
+                              onClick={() => startCreate("servico", row.id)}
+                              title="Adicionar subserviço"
+                            >
+                              <Plus className="h-3 w-3" /> Subserviço
+                            </Button>
+                          )}
+                          <Button variant="ghost" size="sm" onClick={() => setEditing(row)}>
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={async () => {
+                              const hasChildren = data.some((s: any) => s.servico_pai_id === row.id);
+                              if (hasChildren) {
+                                alert("Remova os subserviços antes de excluir este menu.");
+                                return;
+                              }
+                              if (!confirm("Excluir este registro?")) return;
+                              const { error } = await deleteRow("servicos_agendamento", row.id);
+                              if (error) alert(error.message ?? "Erro ao excluir.");
+                              reload();
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Custom modal */}
+      {editing && (
+        <ServicoFormModal
+          row={editing}
+          allServices={data}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); reload(); }}
+          onCreateSubservico={(parentId) => {
+            setEditing(null);
+            setTimeout(() => startCreate("servico", parentId), 50);
+          }}
+        />
+      )}
     </Section>
+  );
+}
+
+// ── Custom modal for services with conditional fields ────────────────────
+
+function ServicoFormModal({
+  row,
+  allServices,
+  onClose,
+  onSaved,
+  onCreateSubservico,
+}: {
+  row: Record<string, any>;
+  allServices: any[];
+  onClose: () => void;
+  onSaved: () => void;
+  onCreateSubservico: (parentId: string) => void;
+}) {
+  const [values, setValues] = useState<Record<string, any>>({ ...row });
+  const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const isEditing = !!values.id;
+  const isMenu = values.tipo === "menu";
+
+  // Menu options for the "pai" select: only tipo=menu items, excluding self
+  const menuOptions = allServices
+    .filter((s: any) => s.tipo === "menu" && s.id !== values.id)
+    .map((s: any) => ({ value: s.id, label: s.nome }));
+
+  // Subservices of this menu (when editing a menu)
+  const subservicos = isEditing && isMenu
+    ? allServices.filter((s: any) => s.servico_pai_id === values.id)
+    : [];
+
+  function set(key: string, val: any) {
+    setValues((p) => ({ ...p, [key]: val }));
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setErrorMsg(null);
+
+    const toSave = { ...values };
+    // Normalize empty strings to null
+    if (toSave.servico_pai_id === "") toSave.servico_pai_id = null;
+    if (!toSave.tipo) toSave.tipo = "servico";
+    // Menus don't need scheduling fields — clear them if menu
+    if (toSave.tipo === "menu") {
+      toSave.servico_pai_id = null;
+    }
+
+    const { error } = await upsertRow("servicos_agendamento", toSave);
+    setSaving(false);
+    if (error) {
+      setErrorMsg(error.message ?? "Erro ao salvar. Verifique as permissões.");
+      return;
+    }
+    onSaved();
+  }
+
+  const inputClass =
+    "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-lg border border-border bg-card shadow-xl">
+        <div className="border-b border-border px-5 py-3">
+          <h3 className="text-base font-semibold text-foreground">
+            {isEditing ? `Editar: ${row.nome}` : (isMenu ? "Novo menu" : "Novo serviço")}
+          </h3>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-3 px-5 py-4 max-h-[70vh] overflow-y-auto">
+
+          {/* ── Tipo selector ───────────────────────────────── */}
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">
+              Este item será: <span className="text-destructive">*</span>
+            </span>
+            <select
+              className={inputClass}
+              value={values.tipo ?? "servico"}
+              onChange={(e) => set("tipo", e.target.value)}
+              required
+            >
+              <option value="servico">Serviço agendável — permite agendamento</option>
+              <option value="menu">Menu/assunto principal — apenas agrupa subserviços</option>
+            </select>
+          </label>
+
+          {/* ── Helper text for menu ─────────────────────────── */}
+          {isMenu && (
+            <div className="rounded border border-blue-200 bg-blue-50 p-2.5 text-xs text-blue-700">
+              <FolderOpen className="mr-1 inline-block h-3.5 w-3.5" />
+              Menus não são agendáveis diretamente. Eles aparecem no chat para organizar subserviços.
+            </div>
+          )}
+
+          {/* ── Nome ────────────────────────────────────────── */}
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">
+              {isMenu ? "Nome do menu" : "Nome do serviço"} <span className="text-destructive">*</span>
+            </span>
+            <input
+              className={inputClass}
+              value={values.nome ?? ""}
+              onChange={(e) => set("nome", e.target.value)}
+              required
+              placeholder={isMenu ? "Ex.: Aposentadoria" : "Ex.: Aposentadoria por idade"}
+            />
+          </label>
+
+          {/* ── Parent select (only for tipo = servico) ──────── */}
+          {!isMenu && (
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">
+                Este serviço pertence a algum menu?
+              </span>
+              <select
+                className={inputClass}
+                value={values.servico_pai_id ?? ""}
+                onChange={(e) => set("servico_pai_id", e.target.value || null)}
+              >
+                <option value="">Não, aparece no menu inicial</option>
+                {menuOptions.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              <span className="block text-[11px] text-muted-foreground">
+                Selecione um menu para tornar este serviço um subserviço.
+              </span>
+            </label>
+          )}
+
+          {/* ── Categoria ───────────────────────────────────── */}
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">Categoria</span>
+            <input
+              className={inputClass}
+              value={values.categoria ?? ""}
+              onChange={(e) => set("categoria", e.target.value)}
+            />
+          </label>
+
+          {/* ── Descrições ──────────────────────────────────── */}
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">Descrição curta</span>
+            <textarea
+              className={`${inputClass} min-h-[60px]`}
+              value={values.descricao_curta ?? ""}
+              onChange={(e) => set("descricao_curta", e.target.value)}
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">Descrição para o usuário</span>
+            <textarea
+              className={`${inputClass} min-h-[60px]`}
+              value={values.descricao_para_usuario ?? ""}
+              onChange={(e) => set("descricao_para_usuario", e.target.value)}
+            />
+          </label>
+
+          {/* ── Scheduling fields (hidden/optional for menus) ── */}
+          {!isMenu && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Duração (minutos)</span>
+                  <input
+                    type="number"
+                    className={inputClass}
+                    value={values.duracao_minutos ?? 30}
+                    onChange={(e) => set("duracao_minutos", e.target.value === "" ? null : Number(e.target.value))}
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Intervalo de slots (min)</span>
+                  <input
+                    type="number"
+                    className={inputClass}
+                    value={values.intervalo_slots_minutos ?? 30}
+                    onChange={(e) => set("intervalo_slots_minutos", e.target.value === "" ? null : Number(e.target.value))}
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Antecedência mínima (h)</span>
+                  <input
+                    type="number"
+                    className={inputClass}
+                    value={values.antecedencia_minima_horas ?? 1}
+                    onChange={(e) => set("antecedencia_minima_horas", e.target.value === "" ? null : Number(e.target.value))}
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Antecedência máxima (dias)</span>
+                  <input
+                    type="number"
+                    className={inputClass}
+                    value={values.antecedencia_maxima_dias ?? 60}
+                    onChange={(e) => set("antecedencia_maxima_dias", e.target.value === "" ? null : Number(e.target.value))}
+                  />
+                </label>
+              </div>
+
+              <label className="block space-y-1">
+                <span className="text-xs font-medium text-foreground">Local de atendimento</span>
+                <input
+                  className={inputClass}
+                  value={values.local_atendimento ?? ""}
+                  onChange={(e) => set("local_atendimento", e.target.value)}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs font-medium text-foreground">
+                  Documentos necessários / Instruções
+                </span>
+                <textarea
+                  className={`${inputClass} min-h-[60px]`}
+                  value={values.instrucoes_confirmacao ?? ""}
+                  onChange={(e) => set("instrucoes_confirmacao", e.target.value)}
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  Liste os documentos e orientações que o usuário deve trazer.
+                </span>
+              </label>
+            </>
+          )}
+
+          {/* ── Order & Active ─────────────────────────────── */}
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">Ordem</span>
+              <input
+                type="number"
+                className={inputClass}
+                value={values.ordem ?? 0}
+                onChange={(e) => set("ordem", e.target.value === "" ? null : Number(e.target.value))}
+              />
+            </label>
+            <label className="flex items-center gap-2 pt-5">
+              <input
+                type="checkbox"
+                checked={!!values.ativo}
+                onChange={(e) => set("ativo", e.target.checked)}
+                className="h-4 w-4"
+              />
+              <span className="text-xs font-medium text-foreground">Ativo</span>
+            </label>
+          </div>
+
+          {/* ── Subservices section (when editing a menu) ──── */}
+          {isEditing && isMenu && (
+            <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-foreground">
+                  Subserviços deste menu ({subservicos.length})
+                </h4>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="gap-1 text-xs"
+                  onClick={() => onCreateSubservico(values.id)}
+                >
+                  <Plus className="h-3 w-3" /> Adicionar subserviço
+                </Button>
+              </div>
+              {subservicos.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Nenhum subserviço vinculado. Clique em "Adicionar subserviço" para criar.
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {subservicos.map((sub: any) => (
+                    <li key={sub.id} className="flex items-center justify-between rounded bg-background px-2.5 py-1.5 text-xs border border-border">
+                      <span className="flex items-center gap-1.5">
+                        <ChevronRight className="h-3 w-3 text-muted-foreground" />
+                        {sub.nome}
+                      </span>
+                      <span className={`text-[10px] ${sub.ativo ? "text-green-600" : "text-red-500"}`}>
+                        {sub.ativo ? "Ativo" : "Inativo"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {/* ── Error ───────────────────────────────────────── */}
+          {errorMsg && (
+            <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+              {errorMsg}
+            </div>
+          )}
+
+          {/* ── Actions ────────────────────────────────────── */}
+          <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancelar
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+              Salvar
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
