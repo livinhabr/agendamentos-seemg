@@ -389,6 +389,188 @@ async function buildAvailabilityContext(
   };
 }
 
+// ── Slot generation engine ───────────────────────────────────────────────
+
+interface Slot {
+  id: number;
+  inicio: string;
+  fim: string;
+  atendente_id: string;
+  atendente_nome: string;
+  calendario_id: string | null;
+}
+
+/**
+ * Generate available time slots based on janelas_atendimento, excluding
+ * exceptions and existing appointments. Pure computation — no Google Calendar.
+ */
+function generateAvailableSlots(
+  avail: AvailabilityContext,
+  maxDays: number = 14,
+  maxSlots: number = 20,
+): Slot[] {
+  const servico = avail.servico;
+  if (!servico) return [];
+
+  const duracaoMin = (servico.duracao_minutos as number) || 30;
+  const antecedenciaMinH = (servico.antecedencia_minima_horas as number) || 1;
+  const antecedenciaMaxD = (servico.antecedencia_maxima_dias as number) || 30;
+  const effectiveMaxDays = Math.min(maxDays, antecedenciaMaxD);
+
+  const now = new Date();
+  const minTime = new Date(now.getTime() + antecedenciaMinH * 60 * 60 * 1000);
+
+  // Map atendentes to their calendario_id
+  const atendenteMap = new Map<string, { nome: string; calendario_id: string | null }>();
+  for (const att of avail.atendentes_servico) {
+    const a = att as any;
+    atendenteMap.set(a.id, { nome: a.nome, calendario_id: a.calendario_id ?? null });
+  }
+
+  // Build a set of attendant IDs linked to this service
+  const linkedAttendantIds = new Set(atendenteMap.keys());
+
+  // If there's a service-level calendario_id, use it as fallback
+  const servicoCalendarioId = (servico.calendario_id as string) ?? null;
+  // Use first calendar from sector as last fallback
+  const sectorCalendarioId = avail.calendarios.length > 0
+    ? (avail.calendarios[0] as any).id as string
+    : null;
+
+  // Parse exceptions into intervals for quick overlap check
+  const exceptions: { start: number; end: number; atendente_id: string | null }[] = [];
+  for (const exc of avail.excecoes_atendimento) {
+    const e = exc as any;
+    if (e.tipo !== "bloqueio") continue;
+    exceptions.push({
+      start: new Date(e.data_inicio).getTime(),
+      end: new Date(e.data_fim).getTime(),
+      atendente_id: e.atendente_id ?? null,
+    });
+  }
+
+  // Parse existing appointments for conflict detection
+  const appointments: { start: number; end: number; atendente_id: string | null }[] = [];
+  for (const apt of avail.agendamentos_existentes) {
+    const a = apt as any;
+    appointments.push({
+      start: new Date(a.inicio).getTime(),
+      end: new Date(a.fim).getTime(),
+      atendente_id: a.atendente_id ?? null,
+    });
+  }
+
+  function isBlocked(slotStart: number, slotEnd: number, atendenteId: string): boolean {
+    // Check exceptions
+    for (const exc of exceptions) {
+      if (exc.atendente_id && exc.atendente_id !== atendenteId) continue;
+      if (slotStart < exc.end && slotEnd > exc.start) return true;
+    }
+    // Check existing appointments
+    for (const apt of appointments) {
+      if (apt.atendente_id && apt.atendente_id !== atendenteId) continue;
+      if (slotStart < apt.end && slotEnd > apt.start) return true;
+    }
+    return false;
+  }
+
+  // Generate slots day by day
+  const slots: Slot[] = [];
+  let slotId = 1;
+
+  for (let dayOffset = 0; dayOffset <= effectiveMaxDays && slots.length < maxSlots; dayOffset++) {
+    const date = new Date(now);
+    date.setDate(date.getDate() + dayOffset);
+    date.setHours(0, 0, 0, 0);
+
+    // JS getDay(): 0=Sunday ... 6=Saturday
+    const jsDow = date.getDay();
+
+    // Find matching janelas for this day of week
+    // janelas_atendimento.dia_semana: check both conventions (0=Sun or 1=Mon)
+    const matchingJanelas = avail.janelas_atendimento.filter((j: any) => {
+      if (j.tipo_janela !== "trabalho") return false;
+      // Support dia_semana as either 0-based (0=Sun) or 1-based (1=Mon)
+      // Try matching both: dia_semana === jsDow OR dia_semana === (jsDow===0?7:jsDow)
+      const d = j.dia_semana as number;
+      return d === jsDow || d === (jsDow === 0 ? 7 : jsDow);
+    });
+
+    for (const janela of matchingJanelas) {
+      const j = janela as any;
+
+      // Determine which attendant this window is for
+      // If janela has atendente_id, use it; otherwise generate for all linked attendants
+      const targetAttendants: string[] = j.atendente_id
+        ? (linkedAttendantIds.has(j.atendente_id) ? [j.atendente_id] : [])
+        : [...linkedAttendantIds];
+
+      // Parse window times (format "HH:MM:SS" or "HH:MM")
+      const [startH, startM] = (j.hora_inicio as string).split(":").map(Number);
+      const [endH, endM] = (j.hora_fim as string).split(":").map(Number);
+
+      const windowStart = new Date(date);
+      windowStart.setHours(startH, startM, 0, 0);
+
+      const windowEnd = new Date(date);
+      windowEnd.setHours(endH, endM, 0, 0);
+
+      for (const atendenteId of targetAttendants) {
+        let cursor = new Date(windowStart);
+
+        while (cursor.getTime() + duracaoMin * 60_000 <= windowEnd.getTime() && slots.length < maxSlots) {
+          const slotStart = cursor.getTime();
+          const slotEnd = slotStart + duracaoMin * 60_000;
+
+          // Skip past slots and respect antecedência mínima
+          if (slotStart >= minTime.getTime() && !isBlocked(slotStart, slotEnd, atendenteId)) {
+            const attInfo = atendenteMap.get(atendenteId);
+            const calendarioId = attInfo?.calendario_id ?? servicoCalendarioId ?? sectorCalendarioId;
+
+            slots.push({
+              id: slotId++,
+              inicio: new Date(slotStart).toISOString(),
+              fim: new Date(slotEnd).toISOString(),
+              atendente_id: atendenteId,
+              atendente_nome: attInfo?.nome ?? "Atendente",
+              calendario_id: calendarioId,
+            });
+          }
+
+          // Advance by duration (slot-by-slot)
+          cursor = new Date(cursor.getTime() + duracaoMin * 60_000);
+        }
+      }
+    }
+  }
+
+  // Sort by start time
+  slots.sort((a, b) => new Date(a.inicio).getTime() - new Date(b.inicio).getTime());
+
+  return slots;
+}
+
+/**
+ * Format a slot list into a human-readable message for the chat.
+ */
+function formatSlotsMessage(slots: Slot[]): string {
+  if (slots.length === 0) {
+    return "Não encontrei horários disponíveis nos próximos dias. Tente novamente mais tarde ou entre em contato com o setor.";
+  }
+
+  const lines = ["Encontrei estes horários disponíveis:\n"];
+  for (const slot of slots) {
+    const dt = new Date(slot.inicio);
+    const dia = dt.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
+    const horaInicio = dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    const dtFim = new Date(slot.fim);
+    const horaFim = dtFim.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    lines.push(`${slot.id}. ${dia} — ${horaInicio} às ${horaFim}`);
+  }
+  lines.push("\nDigite o número do horário desejado.");
+  return lines.join("\n");
+}
+
 // ── Route ────────────────────────────────────────────────────────────────
 
 export default async function chatRoutes(fastify: FastifyInstance) {
@@ -515,6 +697,55 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         setor.id,
         fastify.log,
       );
+
+      // ── Short-circuit: slot generation when etapa = aguardando_horario ──
+      if (conversationState.etapa === "aguardando_horario" && availability_context?.can_schedule) {
+        fastify.log.info({ etapa: "aguardando_horario", servico_id: selectedServicoId }, "Generating available slots");
+
+        const slots = generateAvailableSlots(availability_context);
+        const replyText = formatSlotsMessage(slots);
+
+        const newState: Record<string, unknown> = {
+          ...conversationState,
+          etapa: slots.length > 0 ? "escolhendo_horario" : "aguardando_horario",
+          horarios_disponiveis: slots,
+        };
+
+        // Persist
+        if (conversaId) {
+          await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+          await saveConversationState(conversaId, newState, fastify.log);
+        }
+
+        return {
+          reply: replyText,
+          horarios: slots,
+          conversation_id: conversaId ?? body.session_id,
+          conversation_state: newState,
+          status: "ok",
+        };
+      }
+
+      // If etapa is aguardando_horario but can't schedule, inform user
+      if (conversationState.etapa === "aguardando_horario" && availability_context && !availability_context.can_schedule) {
+        const reason = availability_context.reason ?? "Não foi possível montar a agenda neste momento.";
+        const newState: Record<string, unknown> = {
+          ...conversationState,
+          etapa: "erro_agenda",
+        };
+
+        if (conversaId) {
+          await saveMessage(conversaId, "assistente", reason, {}, fastify.log);
+          await saveConversationState(conversaId, newState, fastify.log);
+        }
+
+        return {
+          reply: reason,
+          conversation_id: conversaId ?? body.session_id,
+          conversation_state: newState,
+          status: "ok",
+        };
+      }
 
       // ── n8n integration (conditional) ──────────────────────────────
       // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
