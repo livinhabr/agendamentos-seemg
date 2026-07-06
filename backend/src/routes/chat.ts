@@ -199,6 +199,196 @@ async function fetchHistory(
   }
 }
 
+// ── Availability context builder ─────────────────────────────────────────
+
+interface AvailabilityContext {
+  servico: Record<string, unknown> | null;
+  atendentes_servico: Record<string, unknown>[];
+  calendarios: Record<string, unknown>[];
+  janelas_atendimento: Record<string, unknown>[];
+  excecoes_atendimento: Record<string, unknown>[];
+  agendamentos_existentes: Record<string, unknown>[];
+  can_schedule: boolean;
+  reason: string | null;
+}
+
+/**
+ * Build availability context for a selected service.
+ * Returns null when no servico_id is present in conversation state.
+ * Never throws — failures are logged and result in empty arrays.
+ */
+async function buildAvailabilityContext(
+  servicoId: string | undefined | null,
+  setorId: string,
+  logger: FastifyInstance["log"],
+): Promise<AvailabilityContext | null> {
+  if (!servicoId) return null;
+
+  // A. Fetch the selected service
+  let servico: Record<string, unknown> | null = null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("servicos_agendamento")
+      .select("id, nome, tipo, servico_pai_id, duracao_minutos, intervalo_slots_minutos, antecedencia_minima_horas, antecedencia_maxima_dias, local_atendimento, instrucoes_confirmacao, ativo, calendario_id")
+      .eq("id", servicoId)
+      .maybeSingle();
+    if (error) {
+      logger.warn({ op: "avail_servico", code: error.code }, "Failed to fetch selected service");
+    } else {
+      servico = data;
+    }
+  } catch (err: any) {
+    logger.warn({ op: "avail_servico", err: err.message }, "Fetch selected service threw");
+  }
+
+  // If service not found or inactive
+  if (!servico) {
+    return {
+      servico: null,
+      atendentes_servico: [],
+      calendarios: [],
+      janelas_atendimento: [],
+      excecoes_atendimento: [],
+      agendamentos_existentes: [],
+      can_schedule: false,
+      reason: "Serviço não encontrado.",
+    };
+  }
+
+  // If it's a menu (not schedulable)
+  if (servico.tipo === "menu") {
+    return {
+      servico,
+      atendentes_servico: [],
+      calendarios: [],
+      janelas_atendimento: [],
+      excecoes_atendimento: [],
+      agendamentos_existentes: [],
+      can_schedule: false,
+      reason: "Este item é um menu/assunto e não permite agendamento direto. Escolha um subserviço.",
+    };
+  }
+
+  if (!servico.ativo) {
+    return {
+      servico,
+      atendentes_servico: [],
+      calendarios: [],
+      janelas_atendimento: [],
+      excecoes_atendimento: [],
+      agendamentos_existentes: [],
+      can_schedule: false,
+      reason: "Este serviço está inativo no momento.",
+    };
+  }
+
+  const today = new Date().toISOString();
+
+  // B–E. Fetch related data in parallel (all resilient)
+  const [atendentes_servico, calendarios, janelas_atendimento, excecoes_atendimento, agendamentos_existentes] = await Promise.all([
+    // B. Attendants linked to this service
+    safeQuery("avail_atendentes_servico", () =>
+      supabaseAdmin
+        .from("atendentes_servicos")
+        .select("atendente_id, servico_id, ativo")
+        .eq("servico_id", servicoId)
+        .eq("ativo", true),
+      logger,
+    ).then(async (links) => {
+      if (links.length === 0) return [];
+      const attendantIds = links.map((l: any) => l.atendente_id);
+      return safeQuery("avail_atendentes_detail", () =>
+        supabaseAdmin
+          .from("atendentes")
+          .select("id, nome, email, cargo, calendario_id, ativo")
+          .in("id", attendantIds)
+          .eq("ativo", true),
+        logger,
+      );
+    }),
+
+    // C. Sector calendars
+    safeQuery("avail_calendarios", () =>
+      supabaseAdmin
+        .from("calendarios_setor")
+        .select("id, nome, google_calendar_id, modo_conexao, status_conexao, ativo")
+        .eq("setor_id", setorId)
+        .eq("ativo", true),
+      logger,
+    ),
+
+    // D. Schedule windows (filtered by setor; also by servico if applicable)
+    safeQuery("avail_janelas", () =>
+      supabaseAdmin
+        .from("janelas_atendimento")
+        .select("id, dia_semana, tipo_janela, hora_inicio, hora_fim, timezone, atendente_id, servico_id, ativo")
+        .eq("setor_id", setorId)
+        .eq("ativo", true)
+        .or(`servico_id.eq.${servicoId},servico_id.is.null`),
+      logger,
+    ),
+
+    // E. Exceptions (future only)
+    safeQuery("avail_excecoes", () =>
+      supabaseAdmin
+        .from("excecoes_atendimento")
+        .select("id, data_inicio, data_fim, tipo, motivo, atendente_id, servico_id, ativo")
+        .eq("setor_id", setorId)
+        .eq("ativo", true)
+        .gte("data_fim", today)
+        .or(`servico_id.eq.${servicoId},servico_id.is.null`),
+      logger,
+    ),
+
+    // F. Existing appointments for this service (to detect conflicts)
+    safeQuery("avail_agendamentos", () =>
+      supabaseAdmin
+        .from("agendamentos")
+        .select("id, inicio, fim, atendente_id, status")
+        .eq("servico_id", servicoId)
+        .gte("inicio", today)
+        .in("status", ["confirmado", "pendente"]),
+      logger,
+    ),
+  ]);
+
+  // Determine if scheduling is possible
+  let can_schedule = true;
+  let reason: string | null = null;
+
+  if (janelas_atendimento.length === 0) {
+    can_schedule = false;
+    reason = "Não há janelas de atendimento configuradas para este serviço.";
+  } else if (atendentes_servico.length === 0) {
+    can_schedule = false;
+    reason = "Não há atendentes vinculados a este serviço.";
+  } else if (calendarios.length === 0) {
+    can_schedule = false;
+    reason = "Não há calendários configurados para este setor.";
+  }
+
+  logger.info({
+    servico_id: servicoId,
+    atendentes: atendentes_servico.length,
+    calendarios: calendarios.length,
+    janelas: janelas_atendimento.length,
+    excecoes: excecoes_atendimento.length,
+    agendamentos: agendamentos_existentes.length,
+    can_schedule,
+  }, "Availability context built");
+
+  return {
+    servico,
+    atendentes_servico,
+    calendarios,
+    janelas_atendimento,
+    excecoes_atendimento,
+    agendamentos_existentes,
+    can_schedule,
+    reason,
+  };
+}
+
 // ── Route ────────────────────────────────────────────────────────────────
 
 export default async function chatRoutes(fastify: FastifyInstance) {
@@ -317,6 +507,15 @@ export default async function chatRoutes(fastify: FastifyInstance) {
         ? await fetchHistory(conversaId, 10, fastify.log)
         : [];
 
+      // ── Build availability context (if service selected) ────────────
+      const conversationState = (conversa?.estado_json ?? {}) as Record<string, unknown>;
+      const selectedServicoId = conversationState.servico_id as string | undefined;
+      const availability_context = await buildAvailabilityContext(
+        selectedServicoId,
+        setor.id,
+        fastify.log,
+      );
+
       // ── n8n integration (conditional) ──────────────────────────────
       // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
       if (!env.N8N_CHAT_WEBHOOK_URL) {
@@ -367,6 +566,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
           campos_chat,
           atendentes,
         },
+        availability_context,
         request_meta: {
           origin: request.headers.origin || null,
         },
