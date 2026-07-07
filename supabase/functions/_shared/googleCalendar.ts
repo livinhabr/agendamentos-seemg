@@ -73,7 +73,7 @@ export async function createCalendarEvent(params: CreateEventParams) {
   const { calendarId, summary, description, start, end, attendees, timezone, logger } = params;
 
   const clientEmail = Deno.env.get("GOOGLE_CALENDAR_CLIENT_EMAIL");
-  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY");
+  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY")?.replace(/\\n/g, '\n');
 
   if (!clientEmail || !privateKey) {
     logger.warn({}, "Google Calendar credentials not configured. Skipping real calendar event creation.");
@@ -132,7 +132,7 @@ export async function checkCalendarAvailability(params: CheckAvailabilityParams)
   const { calendarId, start, end, timezone, logger } = params;
 
   const clientEmail = Deno.env.get("GOOGLE_CALENDAR_CLIENT_EMAIL");
-  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY");
+  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY")?.replace(/\\n/g, '\n');
 
   if (!clientEmail || !privateKey) {
     logger.warn({}, "Google Calendar credentials not configured. Returning mock available.");
