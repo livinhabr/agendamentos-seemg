@@ -12,6 +12,7 @@ const envSchema = z.object({
   N8N_CHAT_WEBHOOK_URL: z.string().optional().transform((val) => val === "" ? undefined : val).pipe(z.string().url().optional()),
   N8N_SYNC_WEBHOOK_URL: z.string().optional().transform((val) => val === "" ? undefined : val).pipe(z.string().url().optional()),
   N8N_SHARED_SECRET: z.string().optional().transform((val) => val === "" ? undefined : val),
+  USE_N8N_CHAT: z.string().optional().transform((val) => val !== "false").default("true"),
   ALLOWED_ORIGINS: z.string().transform((val) => val.split(",").map((s) => s.trim())),
   GOOGLE_CALENDAR_CLIENT_EMAIL: z.string().optional().transform((val) => val === "" ? undefined : val),
   GOOGLE_CALENDAR_PRIVATE_KEY: z.string().optional().transform((val) => val === "" ? undefined : val),

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "../supabase";
 import { env } from "../env";
 import { createCalendarEvent, checkCalendarAvailability } from "../services/googleCalendar";
+import { processChatFlow, ChatPayload } from "../services/chatFlow";
 
 const chatSchema = z.object({
   setor_slug: z.string(),
@@ -321,27 +322,35 @@ async function buildAvailabilityContext(
     ),
 
     // D. Schedule windows (filtered by setor; also by servico if applicable)
-    safeQuery("avail_janelas", () =>
-      supabaseAdmin
+    safeQuery("avail_janelas", () => {
+      let q = supabaseAdmin
         .from("janelas_atendimento")
         .select("id, dia_semana, tipo_janela, hora_inicio, hora_fim, timezone, atendente_id, servico_id, ativo")
         .eq("setor_id", setorId)
-        .eq("ativo", true)
-        .or(`servico_id.eq.${servicoId},servico_id.is.null`),
-      logger,
-    ),
+        .eq("ativo", true);
+      if (servico?.servico_pai_id) {
+        q = q.or(`servico_id.eq.${servicoId},servico_id.eq.${servico.servico_pai_id},servico_id.is.null`);
+      } else {
+        q = q.or(`servico_id.eq.${servicoId},servico_id.is.null`);
+      }
+      return q;
+    }, logger),
 
     // E. Exceptions (future only)
-    safeQuery("avail_excecoes", () =>
-      supabaseAdmin
+    safeQuery("avail_excecoes", () => {
+      let q = supabaseAdmin
         .from("excecoes_atendimento")
         .select("id, data_inicio, data_fim, tipo, motivo, atendente_id, servico_id, ativo")
         .eq("setor_id", setorId)
         .eq("ativo", true)
-        .gte("data_fim", today)
-        .or(`servico_id.eq.${servicoId},servico_id.is.null`),
-      logger,
-    ),
+        .gte("data_fim", today);
+      if (servico?.servico_pai_id) {
+        q = q.or(`servico_id.eq.${servicoId},servico_id.eq.${servico.servico_pai_id},servico_id.is.null`);
+      } else {
+        q = q.or(`servico_id.eq.${servicoId},servico_id.is.null`);
+      }
+      return q;
+    }, logger),
 
     // F. Existing appointments for this service (to detect conflicts)
     safeQuery("avail_agendamentos", () =>
@@ -355,11 +364,25 @@ async function buildAvailabilityContext(
     ),
   ]);
 
+  // Aplicar fallback/hierarquia para janelas_atendimento
+  let janelas_filtradas = janelas_atendimento;
+  const attendantIds = new Set(atendentes_servico.map((a: any) => a.id));
+
+  const j_servico = janelas_atendimento.filter((j: any) => j.servico_id === servicoId);
+  const j_pai = janelas_atendimento.filter((j: any) => servico.servico_pai_id && j.servico_id === servico.servico_pai_id);
+  const j_atendente = janelas_atendimento.filter((j: any) => j.servico_id === null && j.atendente_id && attendantIds.has(j.atendente_id));
+  const j_gerais = janelas_atendimento.filter((j: any) => j.servico_id === null && j.atendente_id === null);
+
+  if (j_servico.length > 0) janelas_filtradas = j_servico;
+  else if (j_pai.length > 0) janelas_filtradas = j_pai;
+  else if (j_atendente.length > 0) janelas_filtradas = j_atendente;
+  else janelas_filtradas = j_gerais;
+
   // Determine if scheduling is possible
   let can_schedule = true;
   let reason: string | null = null;
 
-  if (janelas_atendimento.length === 0) {
+  if (janelas_filtradas.length === 0) {
     can_schedule = false;
     reason = "Não há janelas de atendimento configuradas para este serviço.";
   } else if (atendentes_servico.length === 0) {
@@ -374,7 +397,7 @@ async function buildAvailabilityContext(
     servico_id: servicoId,
     atendentes: atendentes_servico.length,
     calendarios: calendarios.length,
-    janelas: janelas_atendimento.length,
+    janelas: janelas_filtradas.length,
     excecoes: excecoes_atendimento.length,
     agendamentos: agendamentos_existentes.length,
     can_schedule,
@@ -384,7 +407,7 @@ async function buildAvailabilityContext(
     servico,
     atendentes_servico,
     calendarios,
-    janelas_atendimento,
+    janelas_atendimento: janelas_filtradas,
     excecoes_atendimento,
     agendamentos_existentes,
     can_schedule,
@@ -1081,18 +1104,7 @@ Confirma este agendamento?
           };
         }
       }
-
-      // ── n8n integration (conditional) ──────────────────────────────
-      // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
-      if (!env.N8N_CHAT_WEBHOOK_URL) {
-        return {
-          reply: MOCK_REPLY,
-          conversation_id: conversaId ?? body.session_id,
-          status: "ok"
-        };
-      }
-
-      // Build standardised payload for n8n
+      // Build standardised payload for chatFlow and n8n
       const n8nPayload = {
         source: "agenda-setorial-preview",
         setor_slug: body.setor_slug,
@@ -1138,44 +1150,80 @@ Confirma este agendamento?
         },
       };
 
-      // Build headers for n8n request
-      const n8nHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (env.N8N_SHARED_SECRET) {
-        n8nHeaders["X-Agenda-Secret"] = env.N8N_SHARED_SECRET;
-      }
+      // ── Process Chat Flow (Local vs N8N) ──────────────────────────────
+      let replyText = N8N_FALLBACK_REPLY;
+      let newState: Record<string, unknown> | undefined = undefined;
 
-      try {
-        fastify.log.info("Calling n8n chat webhook");
+      if (!env.USE_N8N_CHAT) {
+        // Use local chat engine
+        fastify.log.info("Using local chat flow engine");
+        const flowResponse = processChatFlow(n8nPayload as unknown as ChatPayload);
+        replyText = flowResponse.reply;
+        newState = flowResponse.conversation_state;
+      } else {
+        // If N8N_CHAT_WEBHOOK_URL is not configured, return mock response
+        if (!env.N8N_CHAT_WEBHOOK_URL) {
+          return {
+            reply: MOCK_REPLY,
+            conversation_id: conversaId ?? body.session_id,
+            status: "ok"
+          };
+        }
 
-        const n8nResponse = await fetch(env.N8N_CHAT_WEBHOOK_URL, {
-          method: "POST",
-          headers: n8nHeaders,
-          body: JSON.stringify(n8nPayload),
-          signal: AbortSignal.timeout(15_000), // 15s timeout
-        });
+        // Build headers for n8n request
+        const n8nHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (env.N8N_SHARED_SECRET) {
+          n8nHeaders["X-Agenda-Secret"] = env.N8N_SHARED_SECRET;
+        }
 
-        fastify.log.info({ status: n8nResponse.status }, "n8n response received");
+        try {
+          fastify.log.info("Calling n8n chat webhook");
 
-        if (!n8nResponse.ok) {
-          fastify.log.error({ status: n8nResponse.status }, "n8n returned non-OK status");
+          const n8nResponse = await fetch(env.N8N_CHAT_WEBHOOK_URL, {
+            method: "POST",
+            headers: n8nHeaders,
+            body: JSON.stringify(n8nPayload),
+            signal: AbortSignal.timeout(15_000), // 15s timeout
+          });
+
+          fastify.log.info({ status: n8nResponse.status }, "n8n response received");
+
+          if (!n8nResponse.ok) {
+            fastify.log.error({ status: n8nResponse.status }, "n8n returned non-OK status");
+            return reply.status(502).send({
+              reply: N8N_ERROR_REPLY,
+              conversation_id: conversaId ?? body.session_id,
+              status: "error",
+            });
+          }
+
+          const n8nData = await n8nResponse.json() as Record<string, unknown>;
+
+          // Normalise n8n response
+          replyText = typeof n8nData.reply === "string" && n8nData.reply.trim()
+            ? n8nData.reply
+            : N8N_FALLBACK_REPLY;
+
+          // Persist conversation state returned by n8n (resilient)
+          newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
+        } catch (err: any) {
+          fastify.log.error({ err: err.message, name: err.name }, "n8n webhook failed");
+          if (err.name === "TimeoutError" || err.name === "AbortError") {
+            return reply.status(504).send({
+              reply: "Desculpe, o serviço de atendimento demorou muito para responder. Tente novamente em instantes.",
+              conversation_id: conversaId ?? body.session_id,
+              status: "timeout",
+            });
+          }
           return reply.status(502).send({
             reply: N8N_ERROR_REPLY,
             conversation_id: conversaId ?? body.session_id,
             status: "error",
           });
         }
-
-        const n8nData = await n8nResponse.json() as Record<string, unknown>;
-
-        // Normalise n8n response
-        let replyText = typeof n8nData.reply === "string" && n8nData.reply.trim()
-          ? n8nData.reply
-          : N8N_FALLBACK_REPLY;
-
-        // Persist conversation state returned by n8n (resilient)
-        let newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
+      }
         let horariosList: Slot[] | undefined = undefined;
 
         // ── Intercept: generate slots immediately if n8n transitioned to aguardando_horario ──
@@ -1220,15 +1268,6 @@ Confirma este agendamento?
           status: "ok",
         };
 
-      } catch (n8nErr: any) {
-        // n8n call failed — do NOT break the user experience
-        fastify.log.error({ err: n8nErr.message }, "n8n webhook call failed");
-        return reply.status(502).send({
-          reply: N8N_ERROR_REPLY,
-          conversation_id: conversaId ?? body.session_id,
-          status: "error",
-        });
-      }
 
     } catch (err) {
       if (err instanceof z.ZodError) {
