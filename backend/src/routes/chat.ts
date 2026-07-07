@@ -214,6 +214,7 @@ interface AvailabilityContext {
   agendamentos_existentes: Record<string, unknown>[];
   can_schedule: boolean;
   reason: string | null;
+  bot_calendario_id: string | null;
 }
 
 /**
@@ -224,6 +225,7 @@ interface AvailabilityContext {
 async function buildAvailabilityContext(
   servicoId: string | undefined | null,
   setorId: string,
+  botCalendarioId: string | null,
   logger: FastifyInstance["log"],
 ): Promise<AvailabilityContext | null> {
   if (!servicoId) return null;
@@ -256,6 +258,7 @@ async function buildAvailabilityContext(
       agendamentos_existentes: [],
       can_schedule: false,
       reason: "Serviço não encontrado.",
+      bot_calendario_id: botCalendarioId,
     };
   }
 
@@ -270,6 +273,7 @@ async function buildAvailabilityContext(
       agendamentos_existentes: [],
       can_schedule: false,
       reason: "Este item é um menu/assunto e não permite agendamento direto. Escolha um subserviço.",
+      bot_calendario_id: botCalendarioId,
     };
   }
 
@@ -283,6 +287,7 @@ async function buildAvailabilityContext(
       agendamentos_existentes: [],
       can_schedule: false,
       reason: "Este serviço está inativo no momento.",
+      bot_calendario_id: botCalendarioId,
     };
   }
 
@@ -412,6 +417,7 @@ async function buildAvailabilityContext(
     agendamentos_existentes,
     can_schedule,
     reason,
+    bot_calendario_id: botCalendarioId,
   };
 }
 
@@ -459,6 +465,8 @@ function generateAvailableSlots(
 
   // If there's a service-level calendario_id, use it as fallback
   const servicoCalendarioId = (servico.calendario_id as string) ?? null;
+  // Use bot calendar as 3rd priority
+  const botCalendarioId = avail.bot_calendario_id ?? null;
   // Use first calendar from sector as last fallback
   const sectorCalendarioId = avail.calendarios.length > 0
     ? (avail.calendarios[0] as any).id as string
@@ -552,7 +560,7 @@ function generateAvailableSlots(
           // Skip past slots and respect antecedência mínima
           if (slotStart >= minTime.getTime() && !isBlocked(slotStart, slotEnd, atendenteId)) {
             const attInfo = atendenteMap.get(atendenteId);
-            const calendarioId = servicoCalendarioId ?? attInfo?.calendario_id ?? sectorCalendarioId;
+            const calendarioId = servicoCalendarioId ?? attInfo?.calendario_id ?? botCalendarioId ?? sectorCalendarioId;
 
             slots.push({
               id: slotId++,
@@ -621,7 +629,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
       // ── Validate bot (with extra fields for context) ────────────
       const { data: bot, error: errBot } = await supabaseAdmin
         .from('bots_agendamento')
-        .select('id, nome, slug, saudacao_inicial, tom_de_voz, mensagem_fora_escopo, instrucoes_especificas')
+        .select('id, nome, slug, saudacao_inicial, tom_de_voz, mensagem_fora_escopo, instrucoes_especificas, calendario_id')
         .eq('slug', body.bot_slug)
         .eq('setor_id', setor.id)
         .eq('ativo', true)
@@ -723,6 +731,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
       const availability_context = await buildAvailabilityContext(
         selectedServicoId,
         setor.id,
+        (bot.calendario_id as string) ?? null,
         fastify.log,
       );
 
