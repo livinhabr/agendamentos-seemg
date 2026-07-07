@@ -1170,24 +1170,53 @@ Confirma este agendamento?
         const n8nData = await n8nResponse.json() as Record<string, unknown>;
 
         // Normalise n8n response
-        const replyText = typeof n8nData.reply === "string" && n8nData.reply.trim()
+        let replyText = typeof n8nData.reply === "string" && n8nData.reply.trim()
           ? n8nData.reply
           : N8N_FALLBACK_REPLY;
+
+        // Persist conversation state returned by n8n (resilient)
+        let newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
+        let horariosList: Slot[] | undefined = undefined;
+
+        // ── Intercept: generate slots immediately if n8n transitioned to aguardando_horario ──
+        if (newState?.etapa === "aguardando_horario") {
+          if (availability_context?.can_schedule) {
+            fastify.log.info({ etapa: "aguardando_horario", servico_id: selectedServicoId }, "Generating available slots after n8n");
+            
+            const slots = generateAvailableSlots(availability_context);
+            const slotsMsg = formatSlotsMessage(slots);
+            
+            replyText = replyText + "\n\n" + slotsMsg;
+            newState = {
+              ...newState,
+              etapa: slots.length > 0 ? "escolhendo_horario" : "aguardando_horario",
+              horarios_disponiveis: slots,
+            };
+            horariosList = slots;
+          } else {
+            const reason = availability_context?.reason ?? "Não encontrei horários disponíveis para este serviço no momento.";
+            replyText = replyText + "\n\n" + reason;
+            newState = {
+              ...newState,
+              etapa: "erro_agenda",
+            };
+          }
+        }
 
         // Save assistant reply (resilient)
         if (conversaId) {
           await saveMessage(conversaId, "assistente", replyText as string, {}, fastify.log);
         }
 
-        // Persist conversation state returned by n8n (resilient)
-        const newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
         if (conversaId && newState && typeof newState === "object" && !Array.isArray(newState)) {
           await saveConversationState(conversaId, newState, fastify.log);
         }
 
         return {
           reply: replyText,
+          horarios: horariosList,
           conversation_id: conversaId ?? body.session_id,
+          conversation_state: newState,
           status: "ok",
         };
 
