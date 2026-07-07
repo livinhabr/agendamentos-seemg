@@ -400,6 +400,7 @@ interface Slot {
   fim: string;
   atendente_id: string;
   atendente_nome: string;
+  atendente_email: string | null;
   calendario_id: string | null;
 }
 
@@ -423,11 +424,11 @@ function generateAvailableSlots(
   const now = new Date();
   const minTime = new Date(now.getTime() + antecedenciaMinH * 60 * 60 * 1000);
 
-  // Map atendentes to their calendario_id
-  const atendenteMap = new Map<string, { nome: string; calendario_id: string | null }>();
+  // Map atendentes to their calendario_id and email
+  const atendenteMap = new Map<string, { nome: string; email: string | null; calendario_id: string | null }>();
   for (const att of avail.atendentes_servico) {
     const a = att as any;
-    atendenteMap.set(a.id, { nome: a.nome, calendario_id: a.calendario_id ?? null });
+    atendenteMap.set(a.id, { nome: a.nome, email: a.email ?? null, calendario_id: a.calendario_id ?? null });
   }
 
   // Build a set of attendant IDs linked to this service
@@ -528,7 +529,7 @@ function generateAvailableSlots(
           // Skip past slots and respect antecedência mínima
           if (slotStart >= minTime.getTime() && !isBlocked(slotStart, slotEnd, atendenteId)) {
             const attInfo = atendenteMap.get(atendenteId);
-            const calendarioId = attInfo?.calendario_id ?? servicoCalendarioId ?? sectorCalendarioId;
+            const calendarioId = servicoCalendarioId ?? attInfo?.calendario_id ?? sectorCalendarioId;
 
             slots.push({
               id: slotId++,
@@ -536,6 +537,7 @@ function generateAvailableSlots(
               fim: new Date(slotEnd).toISOString(),
               atendente_id: atendenteId,
               atendente_nome: attInfo?.nome ?? "Atendente",
+              atendente_email: attInfo?.email ?? null,
               calendario_id: calendarioId,
             });
           }
@@ -958,13 +960,18 @@ Confirma este agendamento?
           if (realGoogleCalendarId) {
             const servicoNome = availability_context?.servico?.nome ?? "Serviço";
             
+            // Collect unique attendees
+            const attendeesSet = new Set<string>();
+            if (emailUsr) attendeesSet.add(emailUsr);
+            if (selectedSlot.atendente_email) attendeesSet.add(selectedSlot.atendente_email);
+            
             const gcalResponse = await createCalendarEvent({
               calendarId: realGoogleCalendarId,
               summary: `Agendamento - ${servicoNome} - ${nomeUsr}`,
               description: `Nome: ${nomeUsr}\nE-mail: ${emailUsr}\nServiço: ${servicoNome}\nConversa ID: ${conversaId}\nAgendamento ID: ${agendamento.id}\nOrigem: Agenda Setorial SEE-MG`,
               start: selectedSlot.inicio,
               end: selectedSlot.fim,
-              attendees: emailUsr ? [emailUsr] : [],
+              attendees: Array.from(attendeesSet),
               timezone: "America/Sao_Paulo",
               logger: fastify.log,
             });
