@@ -688,6 +688,7 @@ function PreviewTab() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [sessionUser, setSessionUser] = useState<any>(null);
+  const [sessionId] = useState(() => crypto.randomUUID());
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setSessionUser(data.user));
@@ -698,7 +699,7 @@ function PreviewTab() {
     
     getCanalWidgetByBot([selectedBotId]).then((res) => {
       const activeCanal = res.data?.find((c: any) => c.ativo);
-      setCanal(activeCanal);
+      setCanal(activeCanal || null);
       setMsgs([{ role: "bot", text: bot?.saudacao_inicial ?? "Olá! Como posso ajudar com seu agendamento hoje?" }]);
     });
   }, [selectedBotId, selectedSectorId, bot?.saudacao_inicial]);
@@ -711,11 +712,7 @@ function PreviewTab() {
     setMsgs((m) => [...m, { role: "user", text: userMsg }]);
     setLoading(true);
 
-    let sessionId = localStorage.getItem("agenda_preview_session_id");
-    if (!sessionId) {
-      sessionId = crypto.randomUUID();
-      localStorage.setItem("agenda_preview_session_id", sessionId);
-    }
+
 
     try {
       const payload = {
