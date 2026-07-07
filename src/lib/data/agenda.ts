@@ -98,20 +98,6 @@ export async function getAttendantsBySector(setorIds: string[]) {
   return { data: data ?? [], error: toErr(error) };
 }
 
-export async function getAgendamentosBySector(setorIds: string[]) {
-  if (setorIds.length === 0) return { data: [], error: null };
-  const { data, error } = await db
-    .from("agendamentos")
-    .select(`
-      *,
-      servico:servicos_agendamento(nome),
-      atendente:atendentes(nome),
-      calendario:calendarios_setor(nome)
-    `)
-    .in("setor_id", setorIds)
-    .order("inicio", { ascending: true });
-  return { data: data ?? [], error: toErr(error) };
-}
 
 export async function getSchedulesBySector(setorIds: string[]) {
   if (setorIds.length === 0) return { data: [], error: null };

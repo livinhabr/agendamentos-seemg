@@ -9,14 +9,13 @@ import {
   getFaqsByBot,
   getServicesBySector,
   getCanalWidgetByBot,
-  getAgendamentosBySector,
   upsertRow,
   deleteRow,
 } from "@/lib/data/agenda";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Bot as BotIcon, User, Loader2, Pencil, Trash2, Plus, FolderOpen, ChevronRight, Calendar } from "lucide-react";
-import { sendChatMessage } from "@/lib/api/backend";
+import { sendChatMessage, getAdminAgendamentos } from "@/lib/api/backend";
 import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/chat-agendamento")({
@@ -831,10 +830,35 @@ function PublicarTab() {
 
 function AgendamentosTab() {
   const { selectedSectorId } = useSector();
-  const { data, error, loading } = useResource(
-    () => getAgendamentosBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
+  const [data, setData] = useState<any[]>([]);
+  const [error, setError] = useState<Error | null>(null);
+  const [loading, setLoading] = useState(true);
+  
+  useEffect(() => {
+    async function load() {
+      if (!selectedSectorId) {
+        setData([]);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData.session?.access_token;
+        if (!token) throw new Error("Usuário não autenticado");
+
+        const res = await getAdminAgendamentos(selectedSectorId, token);
+        setData(res.data || []);
+      } catch (err: any) {
+        setError(err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [selectedSectorId]);
+
   const [statusFilter, setStatusFilter] = useState("all");
 
   const filteredData = data.filter((row: any) => {

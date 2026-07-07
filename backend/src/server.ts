@@ -9,6 +9,7 @@ import chatRoutes from "./routes/chat";
 import widgetRoutes from "./routes/widget";
 import meRoutes from "./routes/me";
 import syncSheetRoutes from "./routes/syncSheet";
+import adminRoutes from "./routes/admin";
 
 const fastify = Fastify({
   logger: true,
@@ -37,6 +38,7 @@ async function start() {
   await fastify.register(widgetRoutes);
   await fastify.register(meRoutes);
   await fastify.register(syncSheetRoutes);
+  await fastify.register(adminRoutes);
 
   // Error Handler
   fastify.setErrorHandler((error, request, reply) => {
