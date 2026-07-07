@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { supabaseAdmin } from "../supabase";
 import { env } from "../env";
+import { createCalendarEvent } from "../services/googleCalendar";
 
 const chatSchema = z.object({
   setor_slug: z.string(),
@@ -44,6 +45,8 @@ interface ConversaRecord {
   id: string;
   status: string;
   estado_json: Record<string, unknown>;
+  nome_usuario?: string;
+  email_usuario?: string;
 }
 
 interface MensagemRecord {
@@ -68,7 +71,7 @@ async function findOrCreateConversa(
     // Try to find an existing open conversation
     const { data: existing, error: findErr } = await supabaseAdmin
       .from("conversas_chat")
-      .select("id, status, estado_json")
+      .select("id, status, estado_json, nome_usuario, email_usuario")
       .eq("external_user_id", sessionId)
       .eq("bot_id", botId)
       .eq("canal_widget_id", canalId)
@@ -98,7 +101,7 @@ async function findOrCreateConversa(
         contexto_json: {},
         estado_json: {},
       })
-      .select("id, status, estado_json")
+      .select("id, status, estado_json, nome_usuario, email_usuario")
       .single();
 
     if (createErr || !created) {
@@ -745,6 +748,259 @@ export default async function chatRoutes(fastify: FastifyInstance) {
           conversation_state: newState,
           status: "ok",
         };
+      }
+
+      // ── Short-circuit: selection when etapa = escolhendo_horario ──
+      if (conversationState.etapa === "escolhendo_horario") {
+        const slots = (conversationState.horarios_disponiveis || []) as Slot[];
+        const userMsg = body.message.trim();
+        const optionNum = parseInt(userMsg, 10);
+        const selectedSlot = slots.find(s => s.id === optionNum);
+
+        if (!selectedSlot) {
+          const reason = "Não encontrei essa opção. Escolha um dos horários listados.";
+          if (conversaId) {
+            await saveMessage(conversaId, "assistente", reason, {}, fastify.log);
+            // state remains the same
+          }
+          return {
+            reply: reason,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: conversationState,
+            status: "ok",
+          };
+        }
+
+        // Slot selected successfully. Build confirmation reply.
+        const dtInicio = new Date(selectedSlot.inicio);
+        const dtFim = new Date(selectedSlot.fim);
+        const dia = dtInicio.toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+        const hora = `${dtInicio.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} às ${dtFim.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+        
+        const servicoNome = availability_context?.servico?.nome ?? "Serviço";
+        const nomeUsuario = conversa?.nome_usuario ?? body.user?.name ?? "Não informado";
+        const emailUsuario = conversa?.email_usuario ?? body.user?.email ?? "Não informado";
+
+        const replyText = `Resumo do Agendamento:
+
+Nome: ${nomeUsuario}
+E-mail: ${emailUsuario}
+Serviço: ${servicoNome}
+Data: ${dia}
+Horário: ${hora}
+
+Confirma este agendamento?
+1. Confirmar
+2. Escolher outro horário
+3. Voltar ao menu principal`;
+
+        const newState: Record<string, unknown> = {
+          ...conversationState,
+          etapa: "confirmando_agendamento",
+          horario_selecionado: selectedSlot,
+        };
+
+        if (conversaId) {
+          await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+          await saveConversationState(conversaId, newState, fastify.log);
+        }
+
+        return {
+          reply: replyText,
+          conversation_id: conversaId ?? body.session_id,
+          conversation_state: newState,
+          status: "ok",
+        };
+      }
+
+      // ── Short-circuit: confirmation when etapa = confirmando_agendamento ──
+      if (conversationState.etapa === "confirmando_agendamento") {
+        const userMsg = body.message.trim().toLowerCase();
+        
+        // Prevent duplicate confirmation
+        if (conversationState.agendamento_id) {
+          const dt = new Date((conversationState.horario_selecionado as any).inicio);
+          const replyText = `Seu agendamento já está confirmado para ${dt.toLocaleDateString("pt-BR")} às ${dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`;
+          return {
+            reply: replyText,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: conversationState,
+            status: "ok",
+          };
+        }
+
+        if (userMsg === "1" || userMsg === "confirmar" || userMsg === "confirmo" || userMsg === "sim") {
+          const selectedSlot = conversationState.horario_selecionado as Slot;
+          
+          if (!selectedSlot || !conversationState.servico_id) {
+            const reason = "Ocorreu um erro ao recuperar seu horário. Por favor, escolha outra opção de horário.";
+            return {
+              reply: reason,
+              conversation_id: conversaId ?? body.session_id,
+              conversation_state: { ...conversationState, etapa: "aguardando_horario" },
+              status: "ok",
+            };
+          }
+
+          // Determine the actual google_calendar_id
+          const calDef = availability_context?.calendarios?.find((c: any) => c.id === selectedSlot.calendario_id) as any;
+          const realGoogleCalendarId = calDef?.google_calendar_id;
+
+          // Insert into public.agendamentos
+          const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as any).nome_completo || (conversationState.dados_coletados as any).nome : conversa?.nome_usuario;
+          const emailUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as any).email : conversa?.email_usuario;
+
+          const { data: agendamento, error: insertErr } = await supabaseAdmin
+            .from("agendamentos")
+            .insert({
+              setor_id: setor.id,
+              bot_id: bot.id,
+              servico_id: conversationState.servico_id as string,
+              atendente_id: selectedSlot.atendente_id,
+              calendario_id: selectedSlot.calendario_id,
+              conversa_id: conversaId,
+              nome_usuario: nomeUsr,
+              email_usuario: emailUsr,
+              inicio: selectedSlot.inicio,
+              fim: selectedSlot.fim,
+              status: "pendente_google_calendar",
+            })
+            .select("id")
+            .single();
+
+          if (insertErr || !agendamento) {
+            fastify.log.error({ err: insertErr }, "Failed to insert local agendamento");
+            const reason = "Ocorreu um erro ao registrar seu agendamento. Tente novamente.";
+            return {
+              reply: reason,
+              conversation_id: conversaId ?? body.session_id,
+              conversation_state: conversationState,
+              status: "ok",
+            };
+          }
+
+          // Call Google Calendar API
+          let gcalStatus = "erro_google_calendar";
+          let gcalEventId = null;
+
+          if (realGoogleCalendarId) {
+            const servicoNome = availability_context?.servico?.nome ?? "Serviço";
+            
+            const gcalResponse = await createCalendarEvent({
+              calendarId: realGoogleCalendarId,
+              summary: `Agendamento - ${servicoNome} - ${nomeUsr}`,
+              description: `Nome: ${nomeUsr}\nE-mail: ${emailUsr}\nServiço: ${servicoNome}\nConversa ID: ${conversaId}\nAgendamento ID: ${agendamento.id}\nOrigem: Agenda Setorial SEE-MG`,
+              start: selectedSlot.inicio,
+              end: selectedSlot.fim,
+              attendees: emailUsr ? [emailUsr] : [],
+              timezone: "America/Sao_Paulo",
+              logger: fastify.log,
+            });
+
+            if (gcalResponse.eventId) {
+              gcalStatus = "confirmado";
+              gcalEventId = gcalResponse.eventId;
+            }
+          } else {
+            fastify.log.warn({ agendamento_id: agendamento.id }, "No real google_calendar_id found, leaving pending.");
+          }
+
+          // Update local status
+          await supabaseAdmin
+            .from("agendamentos")
+            .update({
+              status: gcalStatus,
+              google_event_id: gcalEventId,
+            })
+            .eq("id", agendamento.id);
+
+          const dt = new Date(selectedSlot.inicio);
+          const dia = dt.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+          const hora = dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+          
+          let replyText = `Agendamento confirmado com sucesso para ${dia} às ${hora}!`;
+          let nextEtapa = "agendamento_confirmado";
+
+          if (gcalStatus !== "confirmado") {
+            replyText = "Recebi sua solicitação, mas não consegui concluir a confirmação no calendário neste momento. Nossa equipe poderá verificar ou você pode tentar novamente em instantes.";
+            nextEtapa = "erro_confirmacao_agendamento";
+          }
+
+          const newState: Record<string, unknown> = {
+            ...conversationState,
+            etapa: nextEtapa,
+            agendamento_id: agendamento.id,
+            google_event_id: gcalEventId,
+            servico_nome: availability_context?.servico?.nome,
+          };
+
+          if (conversaId) {
+            await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+            await saveConversationState(conversaId, newState, fastify.log);
+          }
+
+          return {
+            reply: replyText,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: newState,
+            status: "ok",
+          };
+        } else if (userMsg === "2") {
+          const newState: Record<string, unknown> = {
+            ...conversationState,
+            etapa: "aguardando_horario",
+          };
+          delete newState.horario_selecionado;
+
+          const replyText = "Tudo bem, vou buscar outras opções de horário para você.";
+
+          if (conversaId) {
+            await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+            await saveConversationState(conversaId, newState, fastify.log);
+          }
+
+          return {
+            reply: replyText,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: newState,
+            status: "ok",
+          };
+        } else if (userMsg === "3") {
+          const newState: Record<string, unknown> = {
+            ...conversationState,
+            etapa: "escolhendo_servico",
+          };
+          delete newState.servico_id;
+          delete newState.servico_nome;
+          delete newState.horario_selecionado;
+          delete newState.assunto_atendimento;
+          delete newState.horarios_disponiveis;
+
+          const replyText = "Voltando ao menu principal. Por favor, digite 'oi' para ver as opções novamente.";
+
+          if (conversaId) {
+            await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+            await saveConversationState(conversaId, newState, fastify.log);
+          }
+
+          return {
+            reply: replyText,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: newState,
+            status: "ok",
+          };
+        } else {
+          const reason = "Por favor, escolha uma das opções:\n1. Confirmar agendamento\n2. Escolher outro horário\n3. Voltar ao menu principal";
+          if (conversaId) {
+            await saveMessage(conversaId, "assistente", reason, {}, fastify.log);
+          }
+          return {
+            reply: reason,
+            conversation_id: conversaId ?? body.session_id,
+            conversation_state: conversationState,
+            status: "ok",
+          };
+        }
       }
 
       // ── n8n integration (conditional) ──────────────────────────────

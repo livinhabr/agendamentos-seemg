@@ -15,6 +15,7 @@
     "@supabase/supabase-js": "^2.39.0",
     "dotenv": "^16.4.0",
     "fastify": "^4.26.0",
+    "googleapis": "^173.0.0",
     "zod": "^3.22.0"
   },
   "devDependencies": {
