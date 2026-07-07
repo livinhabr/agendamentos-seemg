@@ -1,10 +1,14 @@
 // Setup type definitions for built-in Supabase Runtime APIs
 import "@supabase/functions-js/edge-runtime.d.ts";
 
-declare const Deno: any;
+declare namespace Deno {
+  export const env: {
+    get(key: string): string | undefined;
+  };
+}
 
 export default {
-  async fetch(req: Request) {
+  fetch(_req: Request) {
     const PUBLIC_BASE_URL = Deno.env.get("PUBLIC_BASE_URL") || "";
 
     const script = `

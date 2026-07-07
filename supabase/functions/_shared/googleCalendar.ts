@@ -1,9 +1,9 @@
-import * as jose from "npm:jose";
+import * as jose from "https://esm.sh/jose@5";
 
 export interface Logger {
-  info: (obj: any, msg?: string) => void;
-  warn: (obj: any, msg?: string) => void;
-  error: (obj: any, msg?: string) => void;
+  info: (obj: unknown, msg?: string) => void;
+  warn: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
 }
 
 export interface CreateEventParams {
@@ -63,8 +63,9 @@ async function getAccessToken(clientEmail: string, privateKey: string, logger: L
 
     const tokenData = await tokenResponse.json();
     return tokenData.access_token;
-  } catch (err: any) {
-    logger.error({ err: err.message }, "Exception in getAccessToken");
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, "Exception in getAccessToken");
     return null;
   }
 }
@@ -122,8 +123,9 @@ export async function createCalendarEvent(params: CreateEventParams) {
       logger.error({ status: response.status, data: errTxt }, "Failed to create Google Calendar event");
       return { error: "api_error" };
     }
-  } catch (error: any) {
-    logger.error({ err: error.message }, "Exception creating Google Calendar event");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error({ err: message }, "Exception creating Google Calendar event");
     return { error: "exception" };
   }
 }
@@ -170,8 +172,9 @@ export async function checkCalendarAvailability(params: CheckAvailabilityParams)
       logger.error({ status: response.status, data: errTxt }, "Failed to query Google Calendar freebusy");
       return { available: false, error: "api_error", conflicts: [] };
     }
-  } catch (error: any) {
-    logger.error({ err: error.message }, "Exception checking Google Calendar freebusy");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error({ err: message }, "Exception checking Google Calendar freebusy");
     return { available: false, error: "exception", conflicts: [] };
   }
 }
