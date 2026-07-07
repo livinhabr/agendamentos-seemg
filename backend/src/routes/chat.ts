@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { supabaseAdmin } from "../supabase";
 import { env } from "../env";
-import { createCalendarEvent } from "../services/googleCalendar";
+import { createCalendarEvent, checkCalendarAvailability } from "../services/googleCalendar";
 
 const chatSchema = z.object({
   setor_slug: z.string(),
@@ -842,9 +842,81 @@ Confirma este agendamento?
             };
           }
 
+          // 1. Local Conflict Check (Supabase)
+          const { data: localConflicts, error: localConflictErr } = await supabaseAdmin
+            .from("agendamentos")
+            .select("id")
+            .eq("calendario_id", selectedSlot.calendario_id)
+            .lt("inicio", selectedSlot.fim)
+            .gt("fim", selectedSlot.inicio)
+            .in("status", ["pendente_google_calendar", "confirmado", "confirmado_localmente"]);
+
+          if (localConflictErr) {
+            fastify.log.error({ err: localConflictErr }, "Failed to check local conflicts");
+          }
+
+          if (localConflicts && localConflicts.length > 0) {
+            fastify.log.warn({ slot: selectedSlot }, "Local conflict detected before insert.");
+            
+            const newState: Record<string, unknown> = {
+              ...conversationState,
+              etapa: "aguardando_horario",
+            };
+            delete newState.horario_selecionado;
+
+            const replyText = "Esse horário acabou de ficar indisponível. Por favor, escolha outro horário.";
+
+            if (conversaId) {
+              await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+              await saveConversationState(conversaId, newState, fastify.log);
+            }
+
+            return {
+              reply: replyText,
+              conversation_id: conversaId ?? body.session_id,
+              conversation_state: newState,
+              status: "ok",
+            };
+          }
+
           // Determine the actual google_calendar_id
           const calDef = availability_context?.calendarios?.find((c: any) => c.id === selectedSlot.calendario_id) as any;
           const realGoogleCalendarId = calDef?.google_calendar_id;
+
+          // 2. Google Calendar Conflict Check (FreeBusy)
+          if (realGoogleCalendarId) {
+            const gcalAvail = await checkCalendarAvailability({
+              calendarId: realGoogleCalendarId,
+              start: selectedSlot.inicio,
+              end: selectedSlot.fim,
+              timezone: "America/Sao_Paulo",
+              logger: fastify.log,
+            });
+
+            if (!gcalAvail.available) {
+              fastify.log.warn({ slot: selectedSlot, conflicts: gcalAvail.conflicts }, "Google Calendar conflict detected.");
+              
+              const newState: Record<string, unknown> = {
+                ...conversationState,
+                etapa: "conflito_horario",
+              };
+              delete newState.horario_selecionado;
+
+              const replyText = "Esse horário acabou de ficar indisponível no calendário da equipe. Por favor, escolha outro horário.";
+
+              if (conversaId) {
+                await saveMessage(conversaId, "assistente", replyText, {}, fastify.log);
+                await saveConversationState(conversaId, newState, fastify.log);
+              }
+
+              return {
+                reply: replyText,
+                conversation_id: conversaId ?? body.session_id,
+                conversation_state: newState,
+                status: "ok",
+              };
+            }
+          }
 
           // Insert into public.agendamentos
           const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as any).nome_completo || (conversationState.dados_coletados as any).nome : conversa?.nome_usuario;
