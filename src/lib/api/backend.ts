@@ -1,3 +1,5 @@
+import { supabase } from "@/integrations/supabase/client";
+
 export async function sendChatMessage(payload: {
   setor_slug: string;
   bot_slug: string;
@@ -9,35 +11,22 @@ export async function sendChatMessage(payload: {
     email?: string;
   };
 }) {
-  const baseUrl = import.meta.env.VITE_API_BASE_URL;
-  if (!baseUrl) {
-    throw new Error("VITE_API_BASE_URL não configurada no frontend.");
-  }
-
-  const response = await fetch(`${baseUrl}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  const { data, error } = await supabase.functions.invoke("chat", {
+    body: payload,
   });
 
-  if (!response.ok) {
-    let errorMsg = "Erro ao enviar mensagem";
-    try {
-      const errorData = await response.json();
-      if (errorData.error) errorMsg = errorData.error;
-    } catch (e) {
-      // Ignorar erro de parsing
-    }
-    throw new Error(errorMsg);
+  if (error) {
+    throw new Error(error.message || "Erro desconhecido ao chamar o chat");
+  }
+  if (data?.error) {
+    throw new Error(data.error);
   }
 
-  return response.json() as Promise<{
+  return data as {
     reply: string;
     conversation_id: string;
     status: "ok";
-  }>;
+  };
 }
 
 export async function getAdminAgendamentos(setorId: string, token: string) {

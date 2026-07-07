@@ -1,4 +1,4 @@
-import { google } from "npm:googleapis@134.0.0";
+import * as jose from "npm:jose";
 
 export interface Logger {
   info: (obj: any, msg?: string) => void;
@@ -17,6 +17,58 @@ export interface CreateEventParams {
   logger: Logger;
 }
 
+export interface CheckAvailabilityParams {
+  calendarId: string;
+  start: string; // ISO format
+  end: string;   // ISO format
+  timezone?: string;
+  logger: Logger;
+}
+
+/**
+ * Generate a Google OAuth 2.0 Access Token using a Service Account JWT.
+ */
+async function getAccessToken(clientEmail: string, privateKey: string, logger: Logger): Promise<string | null> {
+  try {
+    const alg = 'RS256';
+    const cleanKey = privateKey.replace(/\\n/g, '\n');
+    const privateKeyObj = await jose.importPKCS8(cleanKey, alg);
+
+    const jwt = await new jose.SignJWT({
+      iss: clientEmail,
+      scope: 'https://www.googleapis.com/auth/calendar',
+      aud: 'https://oauth2.googleapis.com/token',
+    })
+      .setProtectedHeader({ alg, typ: 'JWT' })
+      .setIssuedAt()
+      .setExpirationTime('1h')
+      .sign(privateKeyObj);
+
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const errTxt = await tokenResponse.text();
+      logger.error({ status: tokenResponse.status, errTxt }, "Failed to get Google Access Token");
+      return null;
+    }
+
+    const tokenData = await tokenResponse.json();
+    return tokenData.access_token;
+  } catch (err: any) {
+    logger.error({ err: err.message }, "Exception in getAccessToken");
+    return null;
+  }
+}
+
 export async function createCalendarEvent(params: CreateEventParams) {
   const { calendarId, summary, description, start, end, attendees, timezone, logger } = params;
 
@@ -28,16 +80,10 @@ export async function createCalendarEvent(params: CreateEventParams) {
     return { error: "missing_credentials" };
   }
 
+  const token = await getAccessToken(clientEmail, privateKey, logger);
+  if (!token) return { error: "auth_failed" };
+
   try {
-    const auth = new google.auth.JWT(
-      clientEmail,
-      undefined,
-      privateKey.replace(/\\n/g, '\n'),
-      ['https://www.googleapis.com/auth/calendar']
-    );
-
-    const calendar = google.calendar({ version: 'v3', auth });
-
     const eventToInsert = {
       summary,
       description,
@@ -52,34 +98,34 @@ export async function createCalendarEvent(params: CreateEventParams) {
       attendees: attendees && attendees.length > 0 ? attendees.map(email => ({ email })) : undefined,
     };
 
-    const response = await calendar.events.insert({
-      calendarId,
-      requestBody: eventToInsert,
-      sendUpdates: attendees && attendees.length > 0 ? "all" : "none",
+    const sendUpdates = attendees && attendees.length > 0 ? "all" : "none";
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=${sendUpdates}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(eventToInsert),
     });
 
-    if (response.status >= 200 && response.status < 300 && response.data) {
+    if (response.ok) {
+      const data = await response.json();
       return {
-        eventId: response.data.id,
-        htmlLink: response.data.htmlLink,
-        raw: response.data,
+        eventId: data.id,
+        htmlLink: data.htmlLink,
+        raw: data,
       };
     } else {
-      logger.error({ status: response.status, data: response.data }, "Failed to create Google Calendar event");
+      const errTxt = await response.text();
+      logger.error({ status: response.status, data: errTxt }, "Failed to create Google Calendar event");
       return { error: "api_error" };
     }
   } catch (error: any) {
     logger.error({ err: error.message }, "Exception creating Google Calendar event");
     return { error: "exception" };
   }
-}
-
-export interface CheckAvailabilityParams {
-  calendarId: string;
-  start: string; // ISO format
-  end: string;   // ISO format
-  timezone?: string;
-  logger: Logger;
 }
 
 export async function checkCalendarAvailability(params: CheckAvailabilityParams) {
@@ -93,32 +139,35 @@ export async function checkCalendarAvailability(params: CheckAvailabilityParams)
     return { available: true, conflicts: [] };
   }
 
-  try {
-    const auth = new google.auth.JWT(
-      clientEmail,
-      undefined,
-      privateKey.replace(/\\n/g, '\n'),
-      ['https://www.googleapis.com/auth/calendar']
-    );
-    const calendar = google.calendar({ version: 'v3', auth });
+  const token = await getAccessToken(clientEmail, privateKey, logger);
+  if (!token) return { available: false, error: "auth_failed", conflicts: [] };
 
-    const response = await calendar.freebusy.query({
-      requestBody: {
+  try {
+    const url = 'https://www.googleapis.com/calendar/v3/freeBusy';
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
         timeMin: start,
         timeMax: end,
         timeZone: timezone || 'America/Sao_Paulo',
         items: [{ id: calendarId }]
-      }
+      }),
     });
 
-    if (response.status >= 200 && response.status < 300 && response.data.calendars) {
-      const busy = response.data.calendars[calendarId]?.busy || [];
+    if (response.ok) {
+      const data = await response.json();
+      const busy = data.calendars?.[calendarId]?.busy || [];
       return {
         available: busy.length === 0,
         conflicts: busy
       };
     } else {
-      logger.error({ status: response.status, data: response.data }, "Failed to query Google Calendar freebusy");
+      const errTxt = await response.text();
+      logger.error({ status: response.status, data: errTxt }, "Failed to query Google Calendar freebusy");
       return { available: false, error: "api_error", conflicts: [] };
     }
   } catch (error: any) {

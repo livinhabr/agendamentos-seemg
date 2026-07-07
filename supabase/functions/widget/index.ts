@@ -1,6 +1,8 @@
 // Setup type definitions for built-in Supabase Runtime APIs
 import "@supabase/functions-js/edge-runtime.d.ts";
 
+declare const Deno: any;
+
 export default {
   async fetch(req: Request) {
     const PUBLIC_BASE_URL = Deno.env.get("PUBLIC_BASE_URL") || "";
@@ -128,12 +130,8 @@ export default {
   \`;
   document.head.appendChild(style);
 
-  // Generate or get session ID
-  let sessionId = sessionStorage.getItem('agenda_widget_session');
-  if (!sessionId) {
-    sessionId = 'sess_' + Math.random().toString(36).substr(2, 9);
-    sessionStorage.setItem('agenda_widget_session', sessionId);
-  }
+  // Generate session ID - ALWAYS new on page load
+  const sessionId = 'sess_' + Math.random().toString(36).substr(2, 9);
 
   // Create DOM elements
   const container = document.createElement('div');

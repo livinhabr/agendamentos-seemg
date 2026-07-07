@@ -1,3 +1,6 @@
+import { askFAQOpenAI } from "./openai.ts";
+import { logger } from "./logger.ts";
+
 export interface ChatPayload {
   message: string;
   user?: { name?: string; email?: string };
@@ -11,6 +14,8 @@ export interface ChatPayload {
   context: {
     bot: any;
     servicos: any[];
+    perguntas_respostas?: any;
+    atendentes?: any[];
   };
   availability_context?: any;
 }
@@ -20,7 +25,7 @@ export interface ChatResponse {
   conversation_state: Record<string, any>;
 }
 
-export function processChatFlow(payload: ChatPayload): ChatResponse {
+export async function processChatFlow(payload: ChatPayload): Promise<ChatResponse> {
   const { message, conversation, context } = payload;
   const state = conversation.state || {};
   let etapa = state.etapa || "inicio";
@@ -43,6 +48,18 @@ export function processChatFlow(payload: ChatPayload): ChatResponse {
   const rootServices = context.servicos.filter(s => !s.servico_pai_id).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
 
   if (etapa === "inicio") {
+    // Check FAQ first
+    if (context.perguntas_respostas?.texto && lowerMsg !== "oi" && lowerMsg !== "ola" && lowerMsg !== "olá") {
+      logger.info({}, "Checking FAQ via OpenAI");
+      const { answered, reply: aiReply } = await askFAQOpenAI(userMsg, context.perguntas_respostas.texto, logger);
+      if (answered && aiReply) {
+        return {
+          reply: aiReply,
+          conversation_state: newState // stays in inicio
+        };
+      }
+    }
+
     newState.etapa = "pedindo_nome";
     reply = `${context.bot.saudacao_inicial || "Olá!"}\n\nPara começarmos, por favor, me diga o seu nome:`;
   } 

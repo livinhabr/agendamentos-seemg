@@ -1180,7 +1180,7 @@ Confirma este agendamento?
       if (!(Deno.env.get("USE_N8N_CHAT") === "true")) {
         // Use local chat engine
         logger.info("Using local chat flow engine");
-        const flowResponse = processChatFlow(n8nPayload as unknown as ChatPayload);
+        const flowResponse = await processChatFlow(n8nPayload as unknown as ChatPayload);
         replyText = flowResponse.reply;
         newState = flowResponse.conversation_state;
       } else {
