@@ -1,7 +1,7 @@
 export interface Logger {
-  info: (obj: any, msg?: string) => void;
-  warn: (obj: any, msg?: string) => void;
-  error: (obj: any, msg?: string) => void;
+  info: (obj: unknown, msg?: string) => void;
+  warn: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
 }
 
 export async function askFAQOpenAI(
@@ -56,8 +56,9 @@ ${faqText}`;
     }
 
     return { answered: true, reply: aiReply };
-  } catch (err: any) {
-    logger.error({ err: err.message }, "Exception calling OpenAI API");
+  } catch (err: unknown) {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    logger.error({ err: errMessage }, "Exception calling OpenAI API");
     return { answered: false };
   }
 }

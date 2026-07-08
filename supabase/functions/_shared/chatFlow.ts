@@ -1,28 +1,40 @@
 import { askFAQOpenAI } from "./openai.ts";
 import { logger } from "./logger.ts";
 
+export interface ConversationState extends Record<string, unknown> {
+  etapa?: string;
+  current_parent_id?: string | null;
+  servico_id?: string;
+  servico_nome?: string;
+  dados_coletados?: {
+    nome?: string;
+    nome_completo?: string;
+    email?: string;
+  };
+}
+
 export interface ChatPayload {
   message: string;
   user?: { name?: string; email?: string };
-  history: any[];
+  history: unknown[];
   conversation: {
     id: string | null;
     session_id: string;
     status: string;
-    state: Record<string, any>;
+    state: ConversationState;
   };
   context: {
-    bot: any;
-    servicos: any[];
-    perguntas_respostas?: any;
-    atendentes?: any[];
+    bot: { saudacao_inicial?: string; [key: string]: unknown };
+    servicos: { id?: string; nome?: string; tipo?: string; descricao_para_usuario?: string; servico_pai_id?: string | null; ordem?: number; [key: string]: unknown }[];
+    perguntas_respostas?: { texto?: string; [key: string]: unknown } | null;
+    atendentes?: { [key: string]: unknown }[];
   };
-  availability_context?: any;
+  availability_context?: unknown;
 }
 
 export interface ChatResponse {
   reply: string;
-  conversation_state: Record<string, any>;
+  conversation_state: ConversationState;
 }
 
 export async function processChatFlow(payload: ChatPayload): Promise<ChatResponse> {
@@ -30,7 +42,7 @@ export async function processChatFlow(payload: ChatPayload): Promise<ChatRespons
   const state = conversation.state || {};
   let etapa = state.etapa || "inicio";
   let reply = "";
-  const newState = { ...state };
+  const newState: ConversationState = { ...state };
   const userMsg = message.trim();
 
   // Reset if user says "oi" or "olá" etc when stuck
