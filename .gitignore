@@ -39,3 +39,6 @@ playwright-report/
 *.sw?
 .lovable
 backend/.env
+
+backend/.env.local
+supabase/.env
