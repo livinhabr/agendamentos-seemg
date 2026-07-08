@@ -1197,14 +1197,15 @@ Confirma este agendamento?
         const n8nHeaders: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (Deno.env.get("N8N_SHARED_SECRET")) {
-          n8nHeaders["X-Agenda-Secret"] = Deno.env.get("N8N_SHARED_SECRET");
+        const n8nSecret = Deno.env.get("N8N_SHARED_SECRET");
+        if (n8nSecret) {
+          n8nHeaders["X-Agenda-Secret"] = n8nSecret;
         }
 
         try {
           logger.info("Calling n8n chat webhook");
 
-          const n8nResponse = await fetch(Deno.env.get("N8N_CHAT_WEBHOOK_URL"), {
+          const n8nResponse = await fetch(Deno.env.get("N8N_CHAT_WEBHOOK_URL")!, {
             method: "POST",
             headers: n8nHeaders,
             body: JSON.stringify(n8nPayload),
