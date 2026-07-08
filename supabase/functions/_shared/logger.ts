@@ -3,3 +3,5 @@ export const logger = {
   warn: (obj: unknown, msg?: string) => console.warn(msg ? `${msg}: ${JSON.stringify(obj)}` : obj),
   error: (obj: unknown, msg?: string) => console.error(msg ? `${msg}: ${JSON.stringify(obj)}` : obj),
 };
+
+export type Logger = typeof logger;

@@ -4,8 +4,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 import "@supabase/functions-js/edge-runtime.d.ts";
-import { logger } from "../_shared/logger.ts";
-import { z } from "npm:zod";
+import { logger, Logger } from "../_shared/logger.ts";
+import { z } from "zod";
 import { supabaseAdmin } from "../_shared/supabase.ts";
 import { createCalendarEvent, checkCalendarAvailability } from "../_shared/googleCalendar.ts";
 import { processChatFlow, ChatPayload } from "../_shared/chatFlow.ts";
@@ -29,8 +29,8 @@ const N8N_ERROR_REPLY = "Não consegui conectar ao fluxo de atendimento neste mo
 /** Helper: run a supplementary Supabase query; on failure log safely and return []. */
 async function safeQuery<T>(
   label: string,
-  queryFn: () => PromiseLike<{ data: T[] | null; error: any }>,
-  logger: any,
+  queryFn: () => PromiseLike<{ data: T[] | null; error: { code: string } | null }>,
+  logger: Logger,
 ): Promise<T[]> {
   try {
     const { data, error } = await queryFn();
@@ -39,8 +39,8 @@ async function safeQuery<T>(
       return [];
     }
     return data ?? [];
-  } catch (err: any) {
-    logger.warn({ context_query: label, err: err.message }, "Context query threw – sending empty array");
+  } catch (err: unknown) {
+    logger.warn({ context_query: label, err: err instanceof Error ? err.message : String(err) }, "Context query threw – sending empty array");
     return [];
   }
 }
@@ -71,7 +71,7 @@ async function findOrCreateConversa(
   canalId: string,
   userName: string | undefined,
   userEmail: string | undefined,
-  logger: any,
+  logger: Logger,
 ): Promise<ConversaRecord | null> {
   try {
     // Try to find an existing open conversation
@@ -117,8 +117,8 @@ async function findOrCreateConversa(
 
     logger.info({ conversa_id: created.id }, "New conversation created");
     return created as ConversaRecord;
-  } catch (err: any) {
-    logger.warn({ op: "find_or_create_conversa", err: err.message }, "Conversation persistence threw");
+  } catch (err: unknown) {
+    logger.warn({ op: "find_or_create_conversa", err: err instanceof Error ? err.message : String(err) }, "Conversation persistence threw");
     return null;
   }
 }
@@ -132,7 +132,7 @@ async function saveMessage(
   papel: "usuario" | "assistente",
   conteudo: string,
   metadados: Record<string, unknown>,
-  logger: any,
+  logger: Logger,
 ): Promise<void> {
   try {
     const { error } = await supabaseAdmin
@@ -147,8 +147,8 @@ async function saveMessage(
     if (error) {
       logger.warn({ op: "save_message", papel, code: error.code }, "Failed to save message");
     }
-  } catch (err: any) {
-    logger.warn({ op: "save_message", papel, err: err.message }, "Save message threw");
+  } catch (err: unknown) {
+    logger.warn({ op: "save_message", papel, err: err instanceof Error ? err.message : String(err) }, "Save message threw");
   }
 }
 
@@ -159,7 +159,7 @@ async function saveMessage(
 async function saveConversationState(
   conversaId: string,
   state: Record<string, unknown>,
-  logger: any,
+  logger: Logger,
 ): Promise<void> {
   try {
     const { error } = await supabaseAdmin
@@ -170,8 +170,8 @@ async function saveConversationState(
     if (error) {
       logger.warn({ op: "save_state", code: error.code }, "Failed to save conversation state");
     }
-  } catch (err: any) {
-    logger.warn({ op: "save_state", err: err.message }, "Save conversation state threw");
+  } catch (err: unknown) {
+    logger.warn({ op: "save_state", err: err instanceof Error ? err.message : String(err) }, "Save conversation state threw");
   }
 }
 
@@ -181,7 +181,7 @@ async function saveConversationState(
 async function fetchHistory(
   conversaId: string,
   limit: number,
-  logger: any,
+  logger: Logger,
 ): Promise<{ role: "user" | "assistant"; content: string; created_at: string }[]> {
   try {
     const { data, error } = await supabaseAdmin
@@ -202,8 +202,8 @@ async function fetchHistory(
       content: m.conteudo,
       created_at: m.created_at,
     }));
-  } catch (err: any) {
-    logger.warn({ op: "fetch_history", err: err.message }, "Fetch history threw");
+  } catch (err: unknown) {
+    logger.warn({ op: "fetch_history", err: err instanceof Error ? err.message : String(err) }, "Fetch history threw");
     return [];
   }
 }
@@ -231,7 +231,7 @@ async function buildAvailabilityContext(
   servicoId: string | undefined | null,
   setorId: string,
   botCalendarioId: string | null,
-  logger: any,
+  logger: Logger,
 ): Promise<AvailabilityContext | null> {
   if (!servicoId) return null;
 
@@ -248,8 +248,8 @@ async function buildAvailabilityContext(
     } else {
       servico = data;
     }
-  } catch (err: any) {
-    logger.warn({ op: "avail_servico", err: err.message }, "Fetch selected service threw");
+  } catch (err: unknown) {
+    logger.warn({ op: "avail_servico", err: err instanceof Error ? err.message : String(err) }, "Fetch selected service threw");
   }
 
   // If service not found or inactive
@@ -308,9 +308,9 @@ async function buildAvailabilityContext(
         .eq("servico_id", servicoId)
         .eq("ativo", true),
       logger,
-    ).then(async (links) => {
+    ).then((links) => {
       if (links.length === 0) return [];
-      const attendantIds = links.map((l: any) => l.atendente_id);
+      const attendantIds = links.map((l: Record<string, unknown>) => l.atendente_id as string);
       return safeQuery("avail_atendentes_detail", () =>
         supabaseAdmin
           .from("atendentes")
@@ -376,12 +376,12 @@ async function buildAvailabilityContext(
 
   // Aplicar fallback/hierarquia para janelas_atendimento
   let janelas_filtradas = janelas_atendimento;
-  const attendantIds = new Set(atendentes_servico.map((a: any) => a.id));
+  const attendantIds = new Set(atendentes_servico.map((a: Record<string, unknown>) => a.id as string));
 
-  const j_servico = janelas_atendimento.filter((j: any) => j.servico_id === servicoId);
-  const j_pai = janelas_atendimento.filter((j: any) => servico.servico_pai_id && j.servico_id === servico.servico_pai_id);
-  const j_atendente = janelas_atendimento.filter((j: any) => j.servico_id === null && j.atendente_id && attendantIds.has(j.atendente_id));
-  const j_gerais = janelas_atendimento.filter((j: any) => j.servico_id === null && j.atendente_id === null);
+  const j_servico = janelas_atendimento.filter((j: Record<string, unknown>) => j.servico_id === servicoId);
+  const j_pai = janelas_atendimento.filter((j: Record<string, unknown>) => servico.servico_pai_id && j.servico_id === servico.servico_pai_id);
+  const j_atendente = janelas_atendimento.filter((j: Record<string, unknown>) => j.servico_id === null && j.atendente_id && attendantIds.has(j.atendente_id as string));
+  const j_gerais = janelas_atendimento.filter((j: Record<string, unknown>) => j.servico_id === null && j.atendente_id === null);
 
   if (j_servico.length > 0) janelas_filtradas = j_servico;
   else if (j_pai.length > 0) janelas_filtradas = j_pai;
@@ -461,8 +461,8 @@ function generateAvailableSlots(
   // Map atendentes to their calendario_id and email
   const atendenteMap = new Map<string, { nome: string; email: string | null; calendario_id: string | null }>();
   for (const att of avail.atendentes_servico) {
-    const a = att as any;
-    atendenteMap.set(a.id, { nome: a.nome, email: a.email ?? null, calendario_id: a.calendario_id ?? null });
+    const a = att as Record<string, unknown>;
+    atendenteMap.set(a.id as string, { nome: a.nome as string, email: (a.email as string | null) ?? null, calendario_id: (a.calendario_id as string | null) ?? null });
   }
 
   // Build a set of attendant IDs linked to this service
@@ -474,29 +474,29 @@ function generateAvailableSlots(
   const botCalendarioId = avail.bot_calendario_id ?? null;
   // Use first calendar from sector as last fallback
   const sectorCalendarioId = avail.calendarios.length > 0
-    ? (avail.calendarios[0] as any).id as string
+    ? (avail.calendarios[0] as Record<string, unknown>).id as string
     : null;
 
   // Parse exceptions into intervals for quick overlap check
   const exceptions: { start: number; end: number; atendente_id: string | null }[] = [];
   for (const exc of avail.excecoes_atendimento) {
-    const e = exc as any;
+    const e = exc as Record<string, unknown>;
     if (e.tipo !== "bloqueio") continue;
     exceptions.push({
-      start: new Date(e.data_inicio).getTime(),
-      end: new Date(e.data_fim).getTime(),
-      atendente_id: e.atendente_id ?? null,
+      start: new Date(e.data_inicio as string).getTime(),
+      end: new Date(e.data_fim as string).getTime(),
+      atendente_id: (e.atendente_id as string | null) ?? null,
     });
   }
 
   // Parse existing appointments for conflict detection
   const appointments: { start: number; end: number; atendente_id: string | null }[] = [];
   for (const apt of avail.agendamentos_existentes) {
-    const a = apt as any;
+    const a = apt as Record<string, unknown>;
     appointments.push({
-      start: new Date(a.inicio).getTime(),
-      end: new Date(a.fim).getTime(),
-      atendente_id: a.atendente_id ?? null,
+      start: new Date(a.inicio as string).getTime(),
+      end: new Date(a.fim as string).getTime(),
+      atendente_id: (a.atendente_id as string | null) ?? null,
     });
   }
 
@@ -528,7 +528,7 @@ function generateAvailableSlots(
 
     // Find matching janelas for this day of week
     // janelas_atendimento.dia_semana: check both conventions (0=Sun or 1=Mon)
-    const matchingJanelas = avail.janelas_atendimento.filter((j: any) => {
+    const matchingJanelas = avail.janelas_atendimento.filter((j: Record<string, unknown>) => {
       if (j.tipo_janela !== "trabalho") return false;
       // Support dia_semana as either 0-based (0=Sun) or 1-based (1=Mon)
       // Try matching both: dia_semana === jsDow OR dia_semana === (jsDow===0?7:jsDow)
@@ -537,12 +537,12 @@ function generateAvailableSlots(
     });
 
     for (const janela of matchingJanelas) {
-      const j = janela as any;
+      const j = janela as Record<string, unknown>;
 
       // Determine which attendant this window is for
       // If janela has atendente_id, use it; otherwise generate for all linked attendants
       const targetAttendants: string[] = j.atendente_id
-        ? (linkedAttendantIds.has(j.atendente_id) ? [j.atendente_id] : [])
+        ? (linkedAttendantIds.has(j.atendente_id as string) ? [j.atendente_id as string] : [])
         : [...linkedAttendantIds];
 
       // Parse window times (format "HH:MM:SS" or "HH:MM")
@@ -667,7 +667,7 @@ export default {
       }
 
       // Se permitido_embedar existir no banco, validar também
-      if ('permitido_embedar' in canal && (canal as any).permitido_embedar === false) {
+      if ('permitido_embedar' in canal && (canal as Record<string, unknown>).permitido_embedar === false) {
         return new Response(JSON.stringify({ error: "Canal do widget não encontrado, inativo ou não permitido" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
 
@@ -867,7 +867,7 @@ Confirma este agendamento?
         
         // Prevent duplicate confirmation
         if (conversationState.agendamento_id) {
-          const dt = new Date((conversationState.horario_selecionado as any).inicio);
+          const dt = new Date((conversationState.horario_selecionado as Record<string, unknown>).inicio as string);
           const replyText = `Seu agendamento já está confirmado para ${dt.toLocaleDateString("pt-BR")} às ${dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`;
           return {
             reply: replyText,
@@ -928,8 +928,8 @@ Confirma este agendamento?
           }
 
           // Determine the actual google_calendar_id
-          const calDef = availability_context?.calendarios?.find((c: any) => c.id === selectedSlot.calendario_id) as any;
-          const realGoogleCalendarId = calDef?.google_calendar_id;
+          const calDef = availability_context?.calendarios?.find((c: Record<string, unknown>) => c.id === selectedSlot.calendario_id) as Record<string, unknown> | undefined;
+          const realGoogleCalendarId = calDef?.google_calendar_id as string | undefined;
 
           // 2. Google Calendar Conflict Check (FreeBusy)
           if (realGoogleCalendarId) {
@@ -967,8 +967,8 @@ Confirma este agendamento?
           }
 
           // Insert into public.agendamentos
-          const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as any).nome_completo || (conversationState.dados_coletados as any).nome : conversa?.nome_usuario;
-          const emailUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as any).email : conversa?.email_usuario;
+          const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).nome_completo as string || (conversationState.dados_coletados as Record<string, unknown>).nome as string : conversa?.nome_usuario;
+          const emailUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).email as string : conversa?.email_usuario;
 
           const { data: agendamento, error: insertErr } = await supabaseAdmin
             .from("agendamentos")
@@ -1232,9 +1232,9 @@ Confirma este agendamento?
 
           // Persist conversation state returned by n8n (resilient)
           newState = (n8nData.conversation_state ?? n8nData.state) as Record<string, unknown> | undefined;
-        } catch (err: any) {
-          logger.error({ err: err.message, name: err.name }, "n8n webhook failed");
-          if (err.name === "TimeoutError" || err.name === "AbortError") {
+        } catch (err: unknown) {
+          logger.error({ err: err instanceof Error ? err.message : String(err), name: err instanceof Error ? err.name : "UnknownError" }, "n8n webhook failed");
+          if ((err instanceof Error ? err.name : "") === "TimeoutError" || (err instanceof Error ? err.name : "") === "AbortError") {
             return new Response(JSON.stringify({
               reply: "Desculpe, o serviço de atendimento demorou muito para responder. Tente novamente em instantes.",
               conversation_id: conversaId ?? body.session_id,
