@@ -217,6 +217,7 @@ interface AvailabilityContext {
   janelas_atendimento: Record<string, unknown>[];
   excecoes_atendimento: Record<string, unknown>[];
   agendamentos_existentes: Record<string, unknown>[];
+  google_freebusy: { start: number; end: number; atendente_id: string }[];
   can_schedule: boolean;
   reason: string | null;
   bot_calendario_id: string | null;
@@ -261,6 +262,7 @@ async function buildAvailabilityContext(
       janelas_atendimento: [],
       excecoes_atendimento: [],
       agendamentos_existentes: [],
+      google_freebusy: [],
       can_schedule: false,
       reason: "Serviço não encontrado.",
       bot_calendario_id: botCalendarioId,
@@ -276,6 +278,7 @@ async function buildAvailabilityContext(
       janelas_atendimento: [],
       excecoes_atendimento: [],
       agendamentos_existentes: [],
+      google_freebusy: [],
       can_schedule: false,
       reason: "Este item é um menu/assunto e não permite agendamento direto. Escolha um subserviço.",
       bot_calendario_id: botCalendarioId,
@@ -290,6 +293,7 @@ async function buildAvailabilityContext(
       janelas_atendimento: [],
       excecoes_atendimento: [],
       agendamentos_existentes: [],
+      google_freebusy: [],
       can_schedule: false,
       reason: "Este serviço está inativo no momento.",
       bot_calendario_id: botCalendarioId,
@@ -308,17 +312,34 @@ async function buildAvailabilityContext(
         .eq("servico_id", servicoId)
         .eq("ativo", true),
       logger,
-    ).then((links) => {
+    ).then(async (links) => {
       if (links.length === 0) return [];
       const attendantIds = links.map((l: Record<string, unknown>) => l.atendente_id as string);
-      return safeQuery("avail_atendentes_detail", () =>
-        supabaseAdmin
-          .from("atendentes")
-          .select("id, nome, email, cargo, calendario_id, ativo")
-          .in("id", attendantIds)
-          .eq("ativo", true),
-        logger,
-      );
+      
+      const { data: atendentes } = await supabaseAdmin
+        .from("atendentes")
+        .select("id, nome, email, cargo, calendario_id, ativo")
+        .in("id", attendantIds)
+        .eq("ativo", true);
+        
+      if (!atendentes || atendentes.length === 0) return [];
+      
+      // Filter by active Google Connections
+      const { data: connections } = await supabaseAdmin
+        .from("atendente_google_connections")
+        .select("atendente_id, calendar_id")
+        .in("atendente_id", attendantIds)
+        .eq("status", "connected");
+        
+      const connectedSet = new Map<string, string>();
+      if (connections) {
+        connections.forEach(c => connectedSet.set(c.atendente_id, c.calendar_id || "primary"));
+      }
+      
+      // Map to include the specific calendar_id for freebusy check
+      return atendentes
+        .filter(a => connectedSet.has(a.id))
+        .map(a => ({ ...a, google_calendar_id: connectedSet.get(a.id) }));
     }),
 
     // C. Sector calendars
@@ -399,8 +420,45 @@ async function buildAvailabilityContext(
     can_schedule = false;
     reason = "Não há atendentes vinculados a este serviço.";
   } else if (calendarios.length === 0) {
-    can_schedule = false;
-    reason = "Não há calendários configurados para este setor.";
+    // Note: calendarios_setor might be empty if we rely entirely on atendente_google_connections,
+    // so we should not fail if calendarios.length === 0. We'll just continue.
+  }
+
+  // Fetch Google Calendar FreeBusy for connected attendants
+  const google_freebusy: { start: number; end: number; atendente_id: string }[] = [];
+  if (can_schedule && atendentes_servico.length > 0) {
+    const antecedenciaMinH = (servico.antecedencia_minima_horas as number) || 1;
+    const maxDays = Math.min(14, (servico.antecedencia_maxima_dias as number) || 30);
+    
+    const minTime = new Date();
+    minTime.setHours(minTime.getHours() + antecedenciaMinH);
+    
+    const maxTime = new Date();
+    maxTime.setDate(maxTime.getDate() + maxDays + 1); // +1 to cover end of the last day
+    
+    for (const att of atendentes_servico) {
+      const a = att as Record<string, unknown>;
+      const gcalId = (a.google_calendar_id as string) || "primary";
+      
+      const fb = await checkCalendarAvailability({
+        atendente_id: a.id as string,
+        calendarId: gcalId,
+        start: minTime.toISOString(),
+        end: maxTime.toISOString(),
+        timezone: "America/Sao_Paulo",
+        logger,
+      });
+      
+      if (fb.conflicts) {
+        for (const conflict of fb.conflicts) {
+          google_freebusy.push({
+            start: new Date(conflict.start).getTime(),
+            end: new Date(conflict.end).getTime(),
+            atendente_id: a.id as string,
+          });
+        }
+      }
+    }
   }
 
   logger.info({
@@ -420,6 +478,7 @@ async function buildAvailabilityContext(
     janelas_atendimento: janelas_filtradas,
     excecoes_atendimento,
     agendamentos_existentes,
+    google_freebusy,
     can_schedule,
     reason,
     bot_calendario_id: botCalendarioId,
@@ -500,6 +559,8 @@ function generateAvailableSlots(
     });
   }
 
+  const freebusy = avail.google_freebusy || [];
+
   function isBlocked(slotStart: number, slotEnd: number, atendenteId: string): boolean {
     // Check exceptions
     for (const exc of exceptions) {
@@ -510,6 +571,12 @@ function generateAvailableSlots(
     for (const apt of appointments) {
       if (apt.atendente_id && apt.atendente_id !== atendenteId) continue;
       if (slotStart < apt.end && slotEnd > apt.start) return true;
+    }
+    // Check Google Calendar FreeBusy
+    for (const fb of freebusy) {
+      if (fb.atendente_id === atendenteId) {
+        if (slotStart < fb.end && slotEnd > fb.start) return true;
+      }
     }
     return false;
   }
@@ -934,6 +1001,7 @@ Confirma este agendamento?
           // 2. Google Calendar Conflict Check (FreeBusy)
           if (realGoogleCalendarId) {
             const gcalAvail = await checkCalendarAvailability({
+              atendente_id: selectedSlot.atendente_id,
               calendarId: realGoogleCalendarId,
               start: selectedSlot.inicio,
               end: selectedSlot.fim,
@@ -1012,6 +1080,7 @@ Confirma este agendamento?
             if (selectedSlot.atendente_email) attendeesSet.add(selectedSlot.atendente_email);
             
             const gcalResponse = await createCalendarEvent({
+              atendente_id: selectedSlot.atendente_id,
               calendarId: realGoogleCalendarId,
               summary: `Agendamento - ${servicoNome} - ${nomeUsr}`,
               description: `Nome: ${nomeUsr}\nE-mail: ${emailUsr}\nServiço: ${servicoNome}\nConversa ID: ${conversaId}\nAgendamento ID: ${agendamento.id}\nOrigem: Agenda Setorial SEE-MG`,

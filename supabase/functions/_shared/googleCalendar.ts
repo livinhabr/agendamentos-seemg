@@ -1,4 +1,4 @@
-import * as jose from "https://esm.sh/jose@5";
+import { supabaseAdmin } from "./supabase.ts";
 
 export interface Logger {
   info: (obj: unknown, msg?: string) => void;
@@ -7,6 +7,7 @@ export interface Logger {
 }
 
 export interface CreateEventParams {
+  atendente_id: string;
   calendarId: string;
   summary: string;
   description: string;
@@ -18,6 +19,7 @@ export interface CreateEventParams {
 }
 
 export interface CheckAvailabilityParams {
+  atendente_id: string;
   calendarId: string;
   start: string; // ISO format
   end: string;   // ISO format
@@ -26,62 +28,92 @@ export interface CheckAvailabilityParams {
 }
 
 /**
- * Generate a Google OAuth 2.0 Access Token using a Service Account JWT.
+ * Fetch and optionally refresh the OAuth 2.0 Access Token for a given attendant.
  */
-async function getAccessToken(clientEmail: string, privateKey: string, logger: Logger): Promise<string | null> {
+async function getOAuthToken(atendente_id: string, logger: Logger): Promise<string | null> {
   try {
-    const alg = 'RS256';
-    const cleanKey = privateKey.replace(/\\n/g, '\n');
-    const privateKeyObj = await jose.importPKCS8(cleanKey, alg);
+    const { data: conn, error } = await supabaseAdmin
+      .from("atendente_google_connections")
+      .select("id, access_token, refresh_token, token_expiry, status")
+      .eq("atendente_id", atendente_id)
+      .eq("status", "connected")
+      .maybeSingle();
 
-    const jwt = await new jose.SignJWT({
-      iss: clientEmail,
-      scope: 'https://www.googleapis.com/auth/calendar',
-      aud: 'https://oauth2.googleapis.com/token',
-    })
-      .setProtectedHeader({ alg, typ: 'JWT' })
-      .setIssuedAt()
-      .setExpirationTime('1h')
-      .sign(privateKeyObj);
-
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: jwt,
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const errTxt = await tokenResponse.text();
-      logger.error({ status: tokenResponse.status, errTxt }, "Failed to get Google Access Token");
+    if (error || !conn) {
+      logger.warn({ atendente_id }, "No active Google connection found for attendant");
       return null;
     }
 
-    const tokenData = await tokenResponse.json();
-    return tokenData.access_token;
+    const now = new Date();
+    const expiry = new Date(conn.token_expiry);
+    
+    // Refresh token if it expires in less than 5 minutes
+    if (expiry.getTime() - now.getTime() < 5 * 60 * 1000) {
+      if (!conn.refresh_token) {
+        logger.error({ atendente_id }, "Token expired but no refresh_token available");
+        return null;
+      }
+
+      const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID");
+      const clientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET");
+
+      if (!clientId || !clientSecret) {
+        logger.error({}, "Missing GOOGLE_OAUTH_CLIENT_ID or GOOGLE_OAUTH_CLIENT_SECRET");
+        return null;
+      }
+
+      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: "refresh_token",
+          refresh_token: conn.refresh_token,
+        }),
+      });
+
+      if (!tokenResponse.ok) {
+        const errTxt = await tokenResponse.text();
+        logger.error({ status: tokenResponse.status, errTxt }, "Failed to refresh token");
+        // Mark as error
+        await supabaseAdmin.from("atendente_google_connections").update({ status: "error" }).eq("id", conn.id);
+        return null;
+      }
+
+      const tokenData = await tokenResponse.json();
+      const newExpiry = new Date();
+      newExpiry.setSeconds(newExpiry.getSeconds() + (tokenData.expires_in || 3600));
+
+      const { error: updateError } = await supabaseAdmin
+        .from("atendente_google_connections")
+        .update({
+          access_token: tokenData.access_token,
+          refresh_token: tokenData.refresh_token || conn.refresh_token, // keep old if not provided
+          token_expiry: newExpiry.toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", conn.id);
+
+      if (updateError) {
+        logger.error({ updateError }, "Failed to save new access token to db");
+      }
+
+      return tokenData.access_token;
+    }
+
+    return conn.access_token;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "Exception in getAccessToken");
+    logger.error({ err: message }, "Exception in getOAuthToken");
     return null;
   }
 }
 
 export async function createCalendarEvent(params: CreateEventParams) {
-  const { calendarId, summary, description, start, end, attendees, timezone, logger } = params;
+  const { atendente_id, calendarId, summary, description, start, end, attendees, timezone, logger } = params;
 
-  const clientEmail = Deno.env.get("GOOGLE_CALENDAR_CLIENT_EMAIL");
-  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY")?.replace(/\\n/g, '\n');
-
-  if (!clientEmail || !privateKey) {
-    logger.warn({}, "Google Calendar credentials not configured. Skipping real calendar event creation.");
-    return { error: "missing_credentials" };
-  }
-
-  const token = await getAccessToken(clientEmail, privateKey, logger);
+  const token = await getOAuthToken(atendente_id, logger);
   if (!token) return { error: "auth_failed" };
 
   try {
@@ -131,18 +163,15 @@ export async function createCalendarEvent(params: CreateEventParams) {
 }
 
 export async function checkCalendarAvailability(params: CheckAvailabilityParams) {
-  const { calendarId, start, end, timezone, logger } = params;
+  const { atendente_id, calendarId, start, end, timezone, logger } = params;
 
-  const clientEmail = Deno.env.get("GOOGLE_CALENDAR_CLIENT_EMAIL");
-  const privateKey = Deno.env.get("GOOGLE_CALENDAR_PRIVATE_KEY")?.replace(/\\n/g, '\n');
-
-  if (!clientEmail || !privateKey) {
-    logger.warn({}, "Google Calendar credentials not configured. Returning mock available.");
-    return { available: true, conflicts: [] };
+  const token = await getOAuthToken(atendente_id, logger);
+  if (!token) {
+    // If we can't authorize, we assume not available rather than mocking available,
+    // to avoid booking over a calendar we can't check.
+    logger.warn({ atendente_id }, "Could not get token for attendant. Marking as unavailable.");
+    return { available: false, error: "auth_failed", conflicts: [] };
   }
-
-  const token = await getAccessToken(clientEmail, privateKey, logger);
-  if (!token) return { available: false, error: "auth_failed", conflicts: [] };
 
   try {
     const url = 'https://www.googleapis.com/calendar/v3/freeBusy';

@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { PortalLayout, PageHeader, Section } from "@/components/portal/PortalLayout";
 import { CrudTable, type FieldDef } from "@/components/portal/CrudTable";
+import { Button } from "@/components/ui/button";
 import { useSector } from "@/lib/context/SectorContext";
 import { useResource } from "@/lib/hooks/useResource";
 import {
@@ -124,6 +125,42 @@ function AtendentesTab() {
               return names.length > 0 ? names.join(", ") : "Nenhum";
             },
           },
+          {
+            key: "google_connection",
+            label: "Google Calendar",
+            render: (r) => {
+              const conn = r.google_connection;
+              const handleConnect = () => {
+                const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${r.id}`;
+                window.location.href = url;
+              };
+
+              if (!r.id) return <span className="text-muted-foreground text-xs">Salve primeiro</span>;
+
+              if (conn?.status === "connected") {
+                return (
+                  <div className="flex flex-col gap-1">
+                    <span className="text-emerald-600 font-medium text-xs">Conectado</span>
+                    <span className="text-xs text-muted-foreground">{conn.google_email}</span>
+                    <Button variant="outline" size="sm" onClick={handleConnect} className="h-6 text-[10px] mt-1">
+                      Reconectar
+                    </Button>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="flex flex-col gap-1">
+                  <span className="text-muted-foreground text-xs">
+                    {conn?.status === "error" ? "Erro na conexão" : "Não conectado"}
+                  </span>
+                  <Button variant="default" size="sm" onClick={handleConnect} className="h-6 text-[10px]">
+                    Conectar
+                  </Button>
+                </div>
+              );
+            }
+          },
         ]}
         fields={fields}
         loading={loading}
@@ -208,7 +245,7 @@ function HorariosTab() {
           {
             key: "atendente_id",
             label: "Atendente",
-            render: (r) => atendentes.data.find((a: any) => a.id === r.atendente_id)?.nome ?? "—",
+            render: (r) => ((atendentes.data as any[]) || []).find((a: any) => a.id === r.atendente_id)?.nome ?? "—",
           },
         ]}
         fields={fields}

@@ -1,5 +1,4 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
-import { supabaseAdmin } from "../_shared/supabase.ts";
 import { logger } from "../_shared/logger.ts";
 
 const corsHeaders = {
@@ -8,7 +7,7 @@ const corsHeaders = {
 };
 
 export default {
-  async fetch(request: Request) {
+  fetch(request: Request) {
     if (request.method === "OPTIONS") {
       return new Response("ok", { headers: corsHeaders });
     }

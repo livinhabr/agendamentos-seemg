@@ -91,11 +91,30 @@ export async function getServicesBySector(setorIds: string[]) {
 
 export async function getAttendantsBySector(setorIds: string[]) {
   if (setorIds.length === 0) return { data: [], error: null };
-  const { data, error } = await db
+  const { data: atendentes, error } = await db
     .from("atendentes")
     .select("*")
     .in("setor_id", setorIds);
-  return { data: data ?? [], error: toErr(error) };
+    
+  if (error || !atendentes) return { data: [], error: toErr(error) };
+  
+  const attendantIds = atendentes.map((a: any) => a.id);
+  const { data: connections } = await db
+    .from("atendente_google_connections")
+    .select("atendente_id, google_email, status, calendar_id")
+    .in("atendente_id", attendantIds);
+    
+  const connMap = new Map();
+  if (connections) {
+    connections.forEach((c: any) => connMap.set(c.atendente_id, c));
+  }
+  
+  const merged = atendentes.map((a: any) => ({
+    ...a,
+    google_connection: connMap.get(a.id) || null,
+  }));
+
+  return { data: merged, error: null };
 }
 
 
