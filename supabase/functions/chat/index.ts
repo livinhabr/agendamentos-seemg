@@ -808,7 +808,11 @@ export default {
         : [];
 
       // ── Build availability context (if service selected) ────────────
-      const conversationState = (conversa?.estado_json ?? {}) as Record<string, unknown>;
+      let rawState = conversa?.estado_json ?? {};
+      if (typeof rawState === "string") {
+        try { rawState = JSON.parse(rawState); } catch(e) { rawState = {}; }
+      }
+      const conversationState = rawState as Record<string, unknown>;
       const selectedServicoId = conversationState.servico_id as string | undefined;
       const availability_context = await buildAvailabilityContext(
         selectedServicoId,
@@ -836,13 +840,13 @@ export default {
           await saveConversationState(conversaId, newState, logger);
         }
 
-        return {
+        return new Response(JSON.stringify({
           reply: replyText,
           horarios: slots,
           conversation_id: conversaId ?? body.session_id,
           conversation_state: newState,
           status: "ok",
-        };
+        }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       // If etapa is aguardando_horario but can't schedule, inform user
@@ -858,12 +862,12 @@ export default {
           await saveConversationState(conversaId, newState, logger);
         }
 
-        return {
+        return new Response(JSON.stringify({
           reply: reason,
           conversation_id: conversaId ?? body.session_id,
           conversation_state: newState,
           status: "ok",
-        };
+        }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       // ── Short-circuit: selection when etapa = escolhendo_horario ──
@@ -879,12 +883,12 @@ export default {
             await saveMessage(conversaId, "assistente", reason, {}, logger);
             // state remains the same
           }
-          return {
+          return new Response(JSON.stringify({
             reply: reason,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: conversationState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
 
         // Slot selected successfully. Build confirmation reply.
@@ -921,12 +925,12 @@ Confirma este agendamento?
           await saveConversationState(conversaId, newState, logger);
         }
 
-        return {
+        return new Response(JSON.stringify({
           reply: replyText,
           conversation_id: conversaId ?? body.session_id,
           conversation_state: newState,
           status: "ok",
-        };
+        }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       // ── Short-circuit: confirmation when etapa = confirmando_agendamento ──
@@ -937,12 +941,12 @@ Confirma este agendamento?
         if (conversationState.agendamento_id) {
           const dt = new Date((conversationState.horario_selecionado as Record<string, unknown>).inicio as string);
           const replyText = `Seu agendamento já está confirmado para ${dt.toLocaleDateString("pt-BR")} às ${dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`;
-          return {
+          return new Response(JSON.stringify({
             reply: replyText,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: conversationState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
 
         if (userMsg === "1" || userMsg === "confirmar" || userMsg === "confirmo" || userMsg === "sim") {
@@ -950,12 +954,12 @@ Confirma este agendamento?
           
           if (!selectedSlot || !conversationState.servico_id) {
             const reason = "Ocorreu um erro ao recuperar seu horário. Por favor, escolha outra opção de horário.";
-            return {
+            return new Response(JSON.stringify({
               reply: reason,
               conversation_id: conversaId ?? body.session_id,
               conversation_state: { ...conversationState, etapa: "aguardando_horario" },
               status: "ok",
-            };
+            }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
           // 1. Local Conflict Check (Supabase)
@@ -987,12 +991,12 @@ Confirma este agendamento?
               await saveConversationState(conversaId, newState, logger);
             }
 
-            return {
+            return new Response(JSON.stringify({
               reply: replyText,
               conversation_id: conversaId ?? body.session_id,
               conversation_state: newState,
               status: "ok",
-            };
+            }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
           // Determine the actual google_calendar_id
@@ -1026,12 +1030,12 @@ Confirma este agendamento?
                 await saveConversationState(conversaId, newState, logger);
               }
 
-              return {
+              return new Response(JSON.stringify({
                 reply: replyText,
                 conversation_id: conversaId ?? body.session_id,
                 conversation_state: newState,
                 status: "ok",
-              };
+              }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
             }
           }
 
@@ -1060,12 +1064,12 @@ Confirma este agendamento?
           if (insertErr || !agendamento) {
             logger.error({ err: insertErr }, "Failed to insert local agendamento");
             const reason = "Ocorreu um erro ao registrar seu agendamento. Tente novamente.";
-            return {
+            return new Response(JSON.stringify({
               reply: reason,
               conversation_id: conversaId ?? body.session_id,
               conversation_state: conversationState,
               status: "ok",
-            };
+            }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
           // Call Google Calendar API
@@ -1134,12 +1138,12 @@ Confirma este agendamento?
             await saveConversationState(conversaId, newState, logger);
           }
 
-          return {
+          return new Response(JSON.stringify({
             reply: replyText,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: newState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         } else if (userMsg === "2") {
           const newState: Record<string, unknown> = {
             ...conversationState,
@@ -1154,12 +1158,12 @@ Confirma este agendamento?
             await saveConversationState(conversaId, newState, logger);
           }
 
-          return {
+          return new Response(JSON.stringify({
             reply: replyText,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: newState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         } else if (userMsg === "3") {
           const newState: Record<string, unknown> = {
             ...conversationState,
@@ -1178,23 +1182,23 @@ Confirma este agendamento?
             await saveConversationState(conversaId, newState, logger);
           }
 
-          return {
+          return new Response(JSON.stringify({
             reply: replyText,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: newState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         } else {
           const reason = "Por favor, escolha uma das opções:\n1. Confirmar agendamento\n2. Escolher outro horário\n3. Voltar ao menu principal";
           if (conversaId) {
             await saveMessage(conversaId, "assistente", reason, {}, logger);
           }
-          return {
+          return new Response(JSON.stringify({
             reply: reason,
             conversation_id: conversaId ?? body.session_id,
             conversation_state: conversationState,
             status: "ok",
-          };
+          }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
       }
       // Build standardised payload for chatFlow and n8n
