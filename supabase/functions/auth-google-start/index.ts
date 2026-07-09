@@ -15,6 +15,7 @@ export default {
     try {
       const url = new URL(request.url);
       const atendente_id = url.searchParams.get("atendente_id");
+      const return_to = url.searchParams.get("return_to");
       
       if (!atendente_id) {
         return new Response("atendente_id is required", { status: 400, headers: corsHeaders });
@@ -32,7 +33,7 @@ export default {
         return new Response("Server configuration error", { status: 500, headers: corsHeaders });
       }
 
-      const stateObj = { atendente_id };
+      const stateObj = { atendente_id, return_to };
       const stateString = btoa(JSON.stringify(stateObj));
 
       // Build Google OAuth URL

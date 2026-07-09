@@ -30,7 +30,8 @@ export default {
         return new Response("Invalid state", { status: 400, headers: corsHeaders });
       }
 
-      const { atendente_id } = stateObj;
+      const atendente_id = stateObj.atendente_id as string;
+      const return_to = stateObj.return_to as string | undefined;
       if (!atendente_id) {
         return new Response("Invalid state: missing atendente_id", { status: 400, headers: corsHeaders });
       }
@@ -126,11 +127,10 @@ export default {
         return new Response("Failed to save connection", { status: 500, headers: corsHeaders });
       }
 
-      // Get frontend URL from env or fallback
-      const frontendUrl = Deno.env.get("PUBLIC_BASE_URL") || "http://localhost:5173";
-      
       // Redirect back to frontend
-      return Response.redirect(`${frontendUrl}/equipe-agenda`, 302);
+      const fallbackUrl = Deno.env.get("FRONTEND_URL") || Deno.env.get("PUBLIC_BASE_URL") || "http://localhost:8080/equipe-agenda";
+      const finalRedirectUrl = return_to || fallbackUrl;
+      return Response.redirect(finalRedirectUrl, 302);
     } catch (err: unknown) {
       logger.error({ err: err instanceof Error ? err.message : String(err) }, "Error in OAuth callback");
       return new Response("Internal error", { status: 500, headers: corsHeaders });

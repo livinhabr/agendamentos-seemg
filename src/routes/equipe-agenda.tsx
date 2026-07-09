@@ -131,7 +131,8 @@ function AtendentesTab() {
             render: (r) => {
               const conn = r.google_connection;
               const handleConnect = () => {
-                const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${r.id}`;
+                const returnTo = encodeURIComponent(`${window.location.origin}/equipe-agenda`);
+                const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${r.id}&return_to=${returnTo}`;
                 window.location.href = url;
               };
 
