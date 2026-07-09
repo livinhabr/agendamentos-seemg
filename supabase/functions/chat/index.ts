@@ -492,10 +492,16 @@ interface Slot {
   id: number;
   inicio: string;
   fim: string;
-  atendente_id: string;
-  atendente_nome: string;
-  atendente_email: string | null;
-  calendario_id: string | null;
+  atendente_id?: string;
+  atendente_nome?: string;
+  atendente_email?: string | null;
+  calendario_id?: string | null;
+  atendentes_livres?: {
+    atendente_id: string;
+    atendente_nome: string;
+    atendente_email: string | null;
+    calendario_id: string | null;
+  }[];
 }
 
 /**
@@ -583,10 +589,9 @@ function generateAvailableSlots(
   }
 
   // Generate slots day by day
-  const slots: Slot[] = [];
-  let slotId = 1;
+  const rawSlots: Slot[] = [];
 
-  for (let dayOffset = 0; dayOffset <= effectiveMaxDays && slots.length < maxSlots; dayOffset++) {
+  for (let dayOffset = 0; dayOffset <= effectiveMaxDays && rawSlots.length < maxSlots * linkedAttendantIds.size; dayOffset++) {
     const date = new Date(now);
     date.setDate(date.getDate() + dayOffset);
     date.setHours(0, 0, 0, 0);
@@ -626,7 +631,7 @@ function generateAvailableSlots(
       for (const atendenteId of targetAttendants) {
         let cursor = new Date(windowStart);
 
-        while (cursor.getTime() + duracaoMin * 60_000 <= windowEnd.getTime() && slots.length < maxSlots) {
+        while (cursor.getTime() + duracaoMin * 60_000 <= windowEnd.getTime()) {
           const slotStart = cursor.getTime();
           const slotEnd = slotStart + duracaoMin * 60_000;
 
@@ -635,15 +640,28 @@ function generateAvailableSlots(
             const attInfo = atendenteMap.get(atendenteId);
             const calendarioId = servicoCalendarioId ?? attInfo?.calendario_id ?? botCalendarioId ?? sectorCalendarioId;
 
-            slots.push({
-              id: slotId++,
-              inicio: new Date(slotStart).toISOString(),
-              fim: new Date(slotEnd).toISOString(),
+            const isoStart = new Date(slotStart).toISOString();
+            const existingSlot = rawSlots.find(s => s.inicio === isoStart);
+            
+            const freeAtt = {
               atendente_id: atendenteId,
               atendente_nome: attInfo?.nome ?? "Atendente",
               atendente_email: attInfo?.email ?? null,
               calendario_id: calendarioId,
-            });
+            };
+
+            if (existingSlot) {
+              if (!existingSlot.atendentes_livres?.find(a => a.atendente_id === atendenteId)) {
+                existingSlot.atendentes_livres?.push(freeAtt);
+              }
+            } else {
+              rawSlots.push({
+                id: 0, // temporary
+                inicio: isoStart,
+                fim: new Date(slotEnd).toISOString(),
+                atendentes_livres: [freeAtt],
+              });
+            }
           }
 
           // Advance by duration (slot-by-slot)
@@ -654,9 +672,15 @@ function generateAvailableSlots(
   }
 
   // Sort by start time
-  slots.sort((a, b) => new Date(a.inicio).getTime() - new Date(b.inicio).getTime());
+  rawSlots.sort((a, b) => new Date(a.inicio).getTime() - new Date(b.inicio).getTime());
+  
+  // Truncate to maxSlots and assign sequential IDs
+  const finalSlots = rawSlots.slice(0, maxSlots);
+  for (let i = 0; i < finalSlots.length; i++) {
+    finalSlots[i].id = i + 1;
+  }
 
-  return slots;
+  return finalSlots;
 }
 
 /**
@@ -810,7 +834,7 @@ export default {
       // ── Build availability context (if service selected) ────────────
       let rawState = conversa?.estado_json ?? {};
       if (typeof rawState === "string") {
-        try { rawState = JSON.parse(rawState); } catch(e) { rawState = {}; }
+        try { rawState = JSON.parse(rawState); } catch(_e) { rawState = {}; }
       }
       const conversationState = rawState as Record<string, unknown>;
       const selectedServicoId = conversationState.servico_id as string | undefined;
@@ -962,21 +986,86 @@ Confirma este agendamento?
             }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
-          // 1. Local Conflict Check (Supabase)
-          const { data: localConflicts, error: localConflictErr } = await supabaseAdmin
-            .from("agendamentos")
-            .select("id")
-            .eq("calendario_id", selectedSlot.calendario_id)
-            .lt("inicio", selectedSlot.fim)
-            .gt("fim", selectedSlot.inicio)
-            .in("status", ["pendente_google_calendar", "confirmado", "confirmado_localmente"]);
-
-          if (localConflictErr) {
-            logger.error({ err: localConflictErr }, "Failed to check local conflicts");
+          // Resolve attendant from pool
+          const pool = selectedSlot.atendentes_livres || [];
+          if (pool.length === 0) {
+            if (selectedSlot.atendente_id) {
+              pool.push({
+                atendente_id: selectedSlot.atendente_id,
+                atendente_nome: selectedSlot.atendente_nome || "Atendente",
+                atendente_email: selectedSlot.atendente_email || null,
+                calendario_id: selectedSlot.calendario_id || null
+              });
+            }
           }
 
-          if (localConflicts && localConflicts.length > 0) {
-            logger.warn({ slot: selectedSlot }, "Local conflict detected before insert.");
+          // Fetch day appointments to balance load
+          const dayStart = new Date(selectedSlot.inicio);
+          dayStart.setHours(0,0,0,0);
+          const dayEnd = new Date(dayStart);
+          dayEnd.setDate(dayEnd.getDate() + 1);
+
+          const { data: dayApts } = await supabaseAdmin
+            .from("agendamentos")
+            .select("atendente_id")
+            .in("atendente_id", pool.map(a => a.atendente_id))
+            .gte("inicio", dayStart.toISOString())
+            .lt("inicio", dayEnd.toISOString())
+            .in("status", ["pendente_google_calendar", "confirmado", "confirmado_localmente"]);
+
+          const aptCount = new Map();
+          for (const apt of dayApts || []) {
+            aptCount.set(apt.atendente_id, (aptCount.get(apt.atendente_id) || 0) + 1);
+          }
+
+          // Sort pool by count, then name
+          pool.sort((a, b) => {
+            const countA = aptCount.get(a.atendente_id) || 0;
+            const countB = aptCount.get(b.atendente_id) || 0;
+            if (countA !== countB) return countA - countB;
+            return a.atendente_nome.localeCompare(b.atendente_nome);
+          });
+
+          let resolvedAttendant = null;
+          let realGoogleCalendarId = undefined;
+
+          for (const candidate of pool) {
+            // 1. Local Conflict Check (Supabase)
+            const { data: localConflicts } = await supabaseAdmin
+              .from("agendamentos")
+              .select("id")
+              .eq("calendario_id", candidate.calendario_id)
+              .lt("inicio", selectedSlot.fim)
+              .gt("fim", selectedSlot.inicio)
+              .in("status", ["pendente_google_calendar", "confirmado", "confirmado_localmente"]);
+
+            if (localConflicts && localConflicts.length > 0) continue;
+
+            // Determine the actual google_calendar_id
+            const calDef = availability_context?.calendarios?.find((c) => c.id === candidate.calendario_id);
+            const candGCalId = calDef?.google_calendar_id as string | undefined;
+
+            // 2. Google Calendar Conflict Check (FreeBusy)
+            if (candGCalId) {
+              const gcalAvail = await checkCalendarAvailability({
+                atendente_id: candidate.atendente_id,
+                calendarId: candGCalId,
+                start: selectedSlot.inicio,
+                end: selectedSlot.fim,
+                timezone: "America/Sao_Paulo",
+                logger: logger,
+              });
+
+              if (!gcalAvail.available) continue;
+            }
+
+            resolvedAttendant = candidate;
+            realGoogleCalendarId = candGCalId;
+            break;
+          }
+
+          if (!resolvedAttendant) {
+            logger.warn({ slot: selectedSlot }, "No free attendant available after conflict checks.");
             
             const newState: Record<string, unknown> = {
               ...conversationState,
@@ -999,65 +1088,29 @@ Confirma este agendamento?
             }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
-          // Determine the actual google_calendar_id
-          const calDef = availability_context?.calendarios?.find((c: Record<string, unknown>) => c.id === selectedSlot.calendario_id) as Record<string, unknown> | undefined;
-          const realGoogleCalendarId = calDef?.google_calendar_id as string | undefined;
-
-          // 2. Google Calendar Conflict Check (FreeBusy)
-          if (realGoogleCalendarId) {
-            const gcalAvail = await checkCalendarAvailability({
-              atendente_id: selectedSlot.atendente_id,
-              calendarId: realGoogleCalendarId,
-              start: selectedSlot.inicio,
-              end: selectedSlot.fim,
-              timezone: "America/Sao_Paulo",
-              logger: logger,
-            });
-
-            if (!gcalAvail.available) {
-              logger.warn({ slot: selectedSlot, conflicts: gcalAvail.conflicts }, "Google Calendar conflict detected.");
-              
-              const newState: Record<string, unknown> = {
-                ...conversationState,
-                etapa: "conflito_horario",
-              };
-              delete newState.horario_selecionado;
-
-              const replyText = "Esse horário acabou de ficar indisponível no calendário da equipe. Por favor, escolha outro horário.";
-
-              if (conversaId) {
-                await saveMessage(conversaId, "assistente", replyText, {}, logger);
-                await saveConversationState(conversaId, newState, logger);
-              }
-
-              return new Response(JSON.stringify({
-                reply: replyText,
-                conversation_id: conversaId ?? body.session_id,
-                conversation_state: newState,
-                status: "ok",
-              }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-            }
-          }
-
           // Insert into public.agendamentos
           const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).nome_completo as string || (conversationState.dados_coletados as Record<string, unknown>).nome as string : conversa?.nome_usuario;
           const emailUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).email as string : conversa?.email_usuario;
 
+          const agendamentoData: Record<string, unknown> = {
+            setor_id: setor.id,
+            bot_id: bot.id,
+            servico_id: conversationState.servico_id as string,
+            atendente_id: resolvedAttendant.atendente_id,
+            calendario_id: resolvedAttendant.calendario_id,
+            nome_usuario: nomeUsr,
+            email_usuario: emailUsr,
+            inicio: selectedSlot.inicio,
+            fim: selectedSlot.fim,
+            status: "pendente_google_calendar",
+          };
+          if (conversaId) {
+            agendamentoData.conversa_id = conversaId;
+          }
+
           const { data: agendamento, error: insertErr } = await supabaseAdmin
             .from("agendamentos")
-            .insert({
-              setor_id: setor.id,
-              bot_id: bot.id,
-              servico_id: conversationState.servico_id as string,
-              atendente_id: selectedSlot.atendente_id,
-              calendario_id: selectedSlot.calendario_id,
-              conversa_id: conversaId,
-              nome_usuario: nomeUsr,
-              email_usuario: emailUsr,
-              inicio: selectedSlot.inicio,
-              fim: selectedSlot.fim,
-              status: "pendente_google_calendar",
-            })
+            .insert(agendamentoData)
             .select("id")
             .single();
 
@@ -1082,13 +1135,13 @@ Confirma este agendamento?
             // Collect unique attendees
             const attendeesSet = new Set<string>();
             if (emailUsr) attendeesSet.add(emailUsr);
-            if (selectedSlot.atendente_email) attendeesSet.add(selectedSlot.atendente_email);
+            if (resolvedAttendant.atendente_email) attendeesSet.add(resolvedAttendant.atendente_email);
             
             const gcalResponse = await createCalendarEvent({
-              atendente_id: selectedSlot.atendente_id,
+              atendente_id: resolvedAttendant.atendente_id,
               calendarId: realGoogleCalendarId,
               summary: `Agendamento - ${servicoNome} - ${nomeUsr}`,
-              description: `Nome: ${nomeUsr}\nE-mail: ${emailUsr}\nServiço: ${servicoNome}\nConversa ID: ${conversaId}\nAgendamento ID: ${agendamento.id}\nOrigem: Agenda Setorial SEE-MG`,
+              description: `Nome: ${nomeUsr}\nE-mail: ${emailUsr}\nServiço: ${servicoNome}\nConversa ID: ${conversaId || 'N/A'}\nAgendamento ID: ${agendamento.id}\nOrigem: Agenda Setorial SEE-MG`,
               start: selectedSlot.inicio,
               end: selectedSlot.fim,
               attendees: Array.from(attendeesSet),
