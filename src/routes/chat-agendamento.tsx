@@ -794,7 +794,7 @@ function PublicarTab() {
   const sector = sectors.find((s) => s.id === selectedSectorId);
   const bot = bots.find((b) => b.id === selectedBotId);
   const [titulo, setTitulo] = useState(`Atendimento ${sector?.nome ?? ""}`);
-  const [endpoint, setEndpoint] = useState("https://SEU_BACKEND/widget.js");
+  const [endpoint, setEndpoint] = useState(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/widget`);
   const snippet = `<script src="${endpoint}" data-setor-slug="${sector?.slug ?? ""}" data-bot-slug="${bot?.slug ?? ""}" data-title="${titulo.replace(/"/g, "&quot;")}" async></script>`;
   return (
     <div className="space-y-4">

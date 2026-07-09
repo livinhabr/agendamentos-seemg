@@ -9,7 +9,7 @@ declare namespace Deno {
 
 export default {
   fetch(_req: Request) {
-    const PUBLIC_BASE_URL = Deno.env.get("PUBLIC_BASE_URL") || "";
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 
     const script = `
 (function() {
@@ -18,7 +18,7 @@ export default {
   const botSlug = currentScript.getAttribute('data-bot-slug');
   const canalId = currentScript.getAttribute('data-canal-id');
   const title = currentScript.getAttribute('data-title') || 'Atendimento';
-  const apiUrl = '${PUBLIC_BASE_URL}/functions/v1/chat';
+  const apiUrl = '${SUPABASE_URL}/functions/v1/chat';
 
   if (!setorSlug || !botSlug || !canalId) {
     console.error('Agenda Widget: Faltam parâmetros data-* no script.');

@@ -30,26 +30,20 @@ export async function sendChatMessage(payload: {
 }
 
 export async function getAdminAgendamentos(setorId: string, token: string) {
-  const baseUrl = import.meta.env.VITE_API_BASE_URL;
-  if (!baseUrl) {
-    throw new Error("VITE_API_BASE_URL não configurada no frontend.");
+  const { data, error } = await supabase
+    .from("agendamentos")
+    .select(`
+      *,
+      servico:servicos_agendamento(nome),
+      atendente:atendentes(nome),
+      calendario:calendarios_setor(nome)
+    `)
+    .eq("setor_id", setorId)
+    .order("inicio", { ascending: true });
+
+  if (error) {
+    throw new Error(error.message || "Erro ao buscar agendamentos");
   }
 
-  const response = await fetch(`${baseUrl}/api/admin/agendamentos?setor_id=${setorId}`, {
-    method: "GET",
-    headers: {
-      "Authorization": `Bearer ${token}`
-    }
-  });
-
-  if (!response.ok) {
-    let errorMsg = "Erro ao buscar agendamentos";
-    try {
-      const errorData = await response.json();
-      if (errorData.error) errorMsg = errorData.error;
-    } catch (e) {}
-    throw new Error(errorMsg);
-  }
-
-  return response.json();
+  return { data };
 }
