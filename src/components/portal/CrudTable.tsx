@@ -33,6 +33,7 @@ export function CrudTable({
   onChanged,
   validate,
   onSave,
+  renderFormExtra,
 }: {
   title: string;
   table: string;

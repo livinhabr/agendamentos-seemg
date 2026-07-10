@@ -1,7 +1,12 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
-import { supabaseAdmin } from "../_shared/supabase.ts";
 import { logger } from "../_shared/logger.ts";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.4";
+
+const supabaseAdmin = createClient(
+  Deno.env.get("SUPABASE_URL") ?? "",
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

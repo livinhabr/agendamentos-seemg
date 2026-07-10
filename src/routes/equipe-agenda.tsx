@@ -26,6 +26,15 @@ export const Route = createFileRoute("/equipe-agenda")({
       <EquipeAgendaPage />
     </PortalLayout>
   ),
+  errorComponent: ({ error }) => {
+    return (
+      <div className="p-4 bg-red-100 text-red-900 border border-red-500 rounded m-4">
+        <h2 className="font-bold text-lg">Erro na Página</h2>
+        <p className="font-mono text-sm mt-2">{error instanceof Error ? error.message : String(error)}</p>
+        <pre className="font-mono text-xs mt-4 overflow-auto">{error instanceof Error ? error.stack : ""}</pre>
+      </div>
+    );
+  }
 });
 
 const DIAS = [
