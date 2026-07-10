@@ -87,15 +87,10 @@ export default {
           }
         }
 
-        // Remove the tokens and set status to disconnected
+        // Remove the tokens and connection by deleting the row
         const { error: updateError } = await supabaseAdmin
           .from("atendente_google_connections")
-          .update({
-            status: "disconnected",
-            access_token: null,
-            refresh_token: null,
-            updated_at: new Date().toISOString()
-          })
+          .delete()
           .eq("atendente_id", atendente_id);
 
         if (updateError) {

@@ -95,7 +95,9 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
       });
 
       if (!res.ok) {
-        throw new Error("Erro ao desconectar");
+        const errText = await res.text();
+        console.error("Erro do servidor:", errText);
+        throw new Error(`Erro ao desconectar: ${errText}`);
       }
       
       onDisconnect();
