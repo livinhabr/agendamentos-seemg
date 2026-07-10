@@ -1,7 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { Loader2, Calendar } from "lucide-react";
 import { PortalLayout, PageHeader, Section } from "@/components/portal/PortalLayout";
 import { CrudTable, type FieldDef } from "@/components/portal/CrudTable";
 import { Button } from "@/components/ui/button";
+import { supabase } from "@/integrations/supabase/client";
 import { useSector } from "@/lib/context/SectorContext";
 import { useResource } from "@/lib/hooks/useResource";
 import {
@@ -44,13 +47,96 @@ function EquipeAgendaPage() {
           <TabsTrigger value="atendentes">Atendentes</TabsTrigger>
           <TabsTrigger value="horarios">Horários e pausas</TabsTrigger>
           <TabsTrigger value="excecoes">Exceções</TabsTrigger>
-          <TabsTrigger value="calendarios">Calendários / e-mails</TabsTrigger>
+          <TabsTrigger value="calendarios">Calendários do setor</TabsTrigger>
         </TabsList>
         <TabsContent value="atendentes"><AtendentesTab /></TabsContent>
         <TabsContent value="horarios"><HorariosTab /></TabsContent>
         <TabsContent value="excecoes"><ExcecoesTab /></TabsContent>
         <TabsContent value="calendarios"><CalendariosTab /></TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: () => void }) {
+  const [loading, setLoading] = useState(false);
+  const conn = row.google_connection;
+
+  const handleConnect = () => {
+    const returnTo = encodeURIComponent(`${window.location.origin}/equipe-agenda`);
+    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${row.id}&return_to=${returnTo}`;
+    window.location.href = url;
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm("Tem certeza que deseja desconectar o Google Calendar deste atendente?")) return;
+    setLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) throw new Error("Usuário não autenticado");
+
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-disconnect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ atendente_id: row.id })
+      });
+
+      if (!res.ok) {
+        throw new Error("Erro ao desconectar");
+      }
+      
+      onDisconnect();
+    } catch (err: any) {
+      alert(err.message || "Ocorreu um erro ao desconectar");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!row.id) {
+    return (
+      <div className="mt-4 p-4 border border-border rounded-md bg-muted/20">
+        <h4 className="text-sm font-semibold mb-2 flex items-center gap-2 text-foreground"><Calendar className="w-4 h-4 text-muted-foreground" /> Google Calendar</h4>
+        <p className="text-xs text-muted-foreground">Salve o atendente antes de conectar a agenda.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 p-4 border border-border rounded-md bg-muted/20 space-y-3">
+      <h4 className="text-sm font-semibold flex items-center gap-2 text-foreground"><Calendar className="w-4 h-4 text-muted-foreground" /> Google Calendar do atendente</h4>
+      
+      {conn?.status === "connected" ? (
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-emerald-600">Conectado</p>
+            <p className="text-xs text-muted-foreground">{conn.google_email}</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={handleConnect} disabled={loading} type="button" className="h-8 text-xs">
+              Reconectar
+            </Button>
+            <Button variant="destructive" size="sm" onClick={handleDisconnect} disabled={loading} type="button" className="h-8 text-xs">
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Desconectar"}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-muted-foreground">
+              {conn?.status === "error" ? "Erro na conexão" : "Não conectado"}
+            </p>
+          </div>
+          <Button variant="default" size="sm" onClick={handleConnect} disabled={loading} type="button" className="h-8 text-xs">
+            Conectar Google Calendar
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -130,36 +216,9 @@ function AtendentesTab() {
             label: "Google Calendar",
             render: (r) => {
               const conn = r.google_connection;
-              const handleConnect = () => {
-                const returnTo = encodeURIComponent(`${window.location.origin}/equipe-agenda`);
-                const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${r.id}&return_to=${returnTo}`;
-                window.location.href = url;
-              };
-
-              if (!r.id) return <span className="text-muted-foreground text-xs">Salve primeiro</span>;
-
-              if (conn?.status === "connected") {
-                return (
-                  <div className="flex flex-col gap-1">
-                    <span className="text-emerald-600 font-medium text-xs">Conectado</span>
-                    <span className="text-xs text-muted-foreground">{conn.google_email}</span>
-                    <Button variant="outline" size="sm" onClick={handleConnect} className="h-6 text-[10px] mt-1">
-                      Reconectar
-                    </Button>
-                  </div>
-                );
-              }
-
-              return (
-                <div className="flex flex-col gap-1">
-                  <span className="text-muted-foreground text-xs">
-                    {conn?.status === "error" ? "Erro na conexão" : "Não conectado"}
-                  </span>
-                  <Button variant="default" size="sm" onClick={handleConnect} className="h-6 text-[10px]">
-                    Conectar
-                  </Button>
-                </div>
-              );
+              if (conn?.status === "connected") return <span className="text-emerald-600 font-medium text-xs">Conectado</span>;
+              if (conn?.status === "error") return <span className="text-destructive font-medium text-xs">Erro</span>;
+              return <span className="text-muted-foreground text-xs">Não conectado</span>;
             }
           },
         ]}
@@ -177,6 +236,7 @@ function AtendentesTab() {
           return await saveAttendantWithServices(row, serviceIds);
         }}
         onChanged={reload}
+        renderFormExtra={(row) => <GoogleCalendarSection row={row} onDisconnect={reload} />}
       />
     </Section>
   );
@@ -363,8 +423,11 @@ function CalendariosTab() {
   ];
   return (
     <Section>
+      <div className="mb-4 rounded border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900 leading-relaxed">
+        <strong>Aviso:</strong> Use esta aba apenas para calendários gerais do setor. A agenda pessoal do Google de cada atendente deve ser conectada no momento do cadastro do próprio atendente na aba "Atendentes".
+      </div>
       <CrudTable
-        title="Calendários / e-mails dos atendentes"
+        title="Calendários do setor"
         table="calendarios_setor"
         rows={data}
         columns={[

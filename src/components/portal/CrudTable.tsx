@@ -46,6 +46,7 @@ export function CrudTable({
   onChanged?: () => void;
   validate?: (row: Record<string, any>) => string | null;
   onSave?: (row: Record<string, any>) => Promise<{ data?: any; error?: PgErr }>;
+  renderFormExtra?: (row: Record<string, any>) => ReactNode;
 }) {
   const [editing, setEditing] = useState<Record<string, any> | null>(null);
   const isDev = import.meta.env.DEV;
@@ -167,6 +168,7 @@ export function CrudTable({
             onChanged?.();
             return null;
           }}
+          renderFormExtra={renderFormExtra}
         />
       )}
     </div>
@@ -190,12 +192,14 @@ export function FormModal({
   row,
   onClose,
   onSave,
+  renderFormExtra,
 }: {
   title: string;
   fields: FieldDef[];
   row: Record<string, any>;
   onClose: () => void;
   onSave: (row: Record<string, any>) => Promise<string | null>;
+  renderFormExtra?: (row: Record<string, any>) => ReactNode;
 }) {
   const [values, setValues] = useState<Record<string, any>>({ ...row });
   const [saving, setSaving] = useState(false);
@@ -237,6 +241,8 @@ export function FormModal({
               )}
             </div>
           )}
+
+          {renderFormExtra && renderFormExtra(values)}
 
           <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
             <Button type="button" variant="outline" onClick={onClose}>
