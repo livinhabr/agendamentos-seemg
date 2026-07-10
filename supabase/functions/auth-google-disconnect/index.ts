@@ -1,7 +1,7 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { supabaseAdmin } from "../_shared/supabase.ts";
 import { logger } from "../_shared/logger.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.6";
+import { createClient } from "@supabase/supabase-js";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -35,7 +35,7 @@ export default {
       let payload;
       try {
         payload = await request.json();
-      } catch (e) {
+      } catch (_e) {
         return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
 
