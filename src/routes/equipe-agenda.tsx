@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Loader2, Calendar } from "lucide-react";
+import { Loader2, Calendar, Search, ChevronDown, ChevronRight } from "lucide-react";
 import { PortalLayout, PageHeader, Section } from "@/components/portal/PortalLayout";
 import { CrudTable, type FieldDef } from "@/components/portal/CrudTable";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,6 @@ import { useSector } from "@/lib/context/SectorContext";
 import { useResource } from "@/lib/hooks/useResource";
 import {
   getAttendantsBySector,
-  getCalendarsBySector,
   getExceptionsBySector,
   getSchedulesBySector,
   getServicesBySector,
@@ -50,36 +49,35 @@ const DIAS = [
 function EquipeAgendaPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-4">
-      <PageHeader title="Equipe e Agenda" description="Atendentes, horários, exceções e calendários." />
+      <PageHeader title="Equipe e Agenda" description="Atendentes, horários e exceções." />
       <Tabs defaultValue="atendentes">
         <TabsList className="flex w-full flex-wrap">
           <TabsTrigger value="atendentes">Atendentes</TabsTrigger>
           <TabsTrigger value="horarios">Horários e pausas</TabsTrigger>
           <TabsTrigger value="excecoes">Exceções</TabsTrigger>
-          <TabsTrigger value="calendarios">Calendários do setor</TabsTrigger>
         </TabsList>
         <TabsContent value="atendentes"><AtendentesTab /></TabsContent>
         <TabsContent value="horarios"><HorariosTab /></TabsContent>
         <TabsContent value="excecoes"><ExcecoesTab /></TabsContent>
-        <TabsContent value="calendarios"><CalendariosTab /></TabsContent>
       </Tabs>
     </div>
   );
 }
 
-function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const conn = row.google_connection;
+// ── Google Calendar inline actions (for table + modal) ───────────────────
 
-  const handleConnect = () => {
+function useGoogleCalendarActions(reload: () => void) {
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+
+  const handleConnect = (atendenteId: string) => {
     const returnTo = encodeURIComponent(`${window.location.origin}/equipe-agenda`);
-    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${row.id}&return_to=${returnTo}`;
+    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-google-start?atendente_id=${atendenteId}&return_to=${returnTo}`;
     window.location.href = url;
   };
 
-  const handleDisconnect = async () => {
+  const handleDisconnect = async (atendenteId: string) => {
     if (!confirm("Tem certeza que deseja desconectar o Google Calendar deste atendente?")) return;
-    setLoading(true);
+    setLoadingId(atendenteId);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
@@ -91,22 +89,64 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ atendente_id: row.id })
+        body: JSON.stringify({ atendente_id: atendenteId })
       });
 
       if (!res.ok) {
         const errText = await res.text();
-        console.error("Erro do servidor:", errText);
         throw new Error(`Erro ao desconectar: ${errText}`);
       }
-      
-      onDisconnect();
+
+      reload();
     } catch (err: any) {
       alert(err.message || "Ocorreu um erro ao desconectar");
     } finally {
-      setLoading(false);
+      setLoadingId(null);
     }
   };
+
+  return { handleConnect, handleDisconnect, loadingId };
+}
+
+function GoogleCalendarCell({ row, actions }: {
+  row: any;
+  actions: ReturnType<typeof useGoogleCalendarActions>;
+}) {
+  const conn = row.google_connection;
+  const isLoading = actions.loadingId === row.id;
+
+  if (conn?.status === "connected") {
+    return (
+      <div className="flex flex-col gap-1">
+        <span className="text-emerald-600 font-medium text-xs">Conectado</span>
+        <span className="text-[10px] text-muted-foreground truncate max-w-[160px]">{conn.google_email}</span>
+        <div className="flex gap-1 mt-0.5">
+          <Button variant="outline" size="sm" onClick={() => actions.handleConnect(row.id)} disabled={isLoading} type="button" className="h-6 text-[10px] px-2">
+            Reconectar
+          </Button>
+          <Button variant="destructive" size="sm" onClick={() => actions.handleDisconnect(row.id)} disabled={isLoading} type="button" className="h-6 text-[10px] px-2">
+            {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "Desconectar"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-muted-foreground text-xs">
+        {conn?.status === "error" ? "Erro na conexão" : "Não conectado"}
+      </span>
+      <Button variant="default" size="sm" onClick={() => actions.handleConnect(row.id)} disabled={isLoading} type="button" className="h-6 text-[10px] px-2 w-fit">
+        Conectar
+      </Button>
+    </div>
+  );
+}
+
+function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: () => void }) {
+  const actions = useGoogleCalendarActions(onDisconnect);
+  const conn = row.google_connection;
 
   if (!row.id) {
     return (
@@ -120,7 +160,7 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
   return (
     <div className="mt-4 p-4 border border-border rounded-md bg-muted/20 space-y-3">
       <h4 className="text-sm font-semibold flex items-center gap-2 text-foreground"><Calendar className="w-4 h-4 text-muted-foreground" /> Google Calendar do atendente</h4>
-      
+
       {conn?.status === "connected" ? (
         <div className="flex items-center justify-between">
           <div>
@@ -128,11 +168,11 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
             <p className="text-xs text-muted-foreground">{conn.google_email}</p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={handleConnect} disabled={loading} type="button" className="h-8 text-xs">
+            <Button variant="outline" size="sm" onClick={() => actions.handleConnect(row.id)} disabled={actions.loadingId === row.id} type="button" className="h-8 text-xs">
               Reconectar
             </Button>
-            <Button variant="destructive" size="sm" onClick={handleDisconnect} disabled={loading} type="button" className="h-8 text-xs">
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Desconectar"}
+            <Button variant="destructive" size="sm" onClick={() => actions.handleDisconnect(row.id)} disabled={actions.loadingId === row.id} type="button" className="h-8 text-xs">
+              {actions.loadingId === row.id ? <Loader2 className="w-4 h-4 animate-spin" /> : "Desconectar"}
             </Button>
           </div>
         </div>
@@ -143,7 +183,7 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
               {conn?.status === "error" ? "Erro na conexão" : "Não conectado"}
             </p>
           </div>
-          <Button variant="default" size="sm" onClick={handleConnect} disabled={loading} type="button" className="h-8 text-xs">
+          <Button variant="default" size="sm" onClick={() => actions.handleConnect(row.id)} disabled={actions.loadingId === row.id} type="button" className="h-8 text-xs">
             Conectar Google Calendar
           </Button>
         </div>
@@ -151,6 +191,177 @@ function GoogleCalendarSection({ row, onDisconnect }: { row: any; onDisconnect: 
     </div>
   );
 }
+
+// ── Hierarchical service picker with search & select all ─────────────────
+
+function HierarchicalServicePicker({
+  servicos,
+  selectedIds,
+  onChange,
+}: {
+  servicos: any[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  // Build hierarchy: roots (no parent) and children (with parent)
+  const roots = servicos.filter((s) => !s.servico_pai_id).sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0));
+  const childrenMap = new Map<string, any[]>();
+  servicos.forEach((s) => {
+    if (s.servico_pai_id) {
+      const arr = childrenMap.get(s.servico_pai_id) || [];
+      arr.push(s);
+      childrenMap.set(s.servico_pai_id, arr.sort((a: any, b: any) => (a.ordem ?? 0) - (b.ordem ?? 0)));
+    }
+  });
+
+  // Filter by search
+  const lowerSearch = search.toLowerCase();
+  const matchesSearch = (s: any) => !search || s.nome.toLowerCase().includes(lowerSearch);
+
+  // Gather all selectable IDs (non-menu items, or items matching search)
+  const allSelectableIds = servicos.filter((s) => s.tipo !== "menu" && matchesSearch(s)).map((s) => s.id);
+
+  const allSelected = allSelectableIds.length > 0 && allSelectableIds.every((id) => selectedIds.includes(id));
+
+  const toggleGroup = (id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleItem = (id: string) => {
+    const next = selectedIds.includes(id)
+      ? selectedIds.filter((x) => x !== id)
+      : [...selectedIds, id];
+    onChange(next);
+  };
+
+  const selectAll = () => onChange([...new Set([...selectedIds, ...allSelectableIds])]);
+  const deselectAll = () => onChange(selectedIds.filter((id) => !allSelectableIds.includes(id)));
+
+  const selectAllChildren = (parentId: string) => {
+    const children = (childrenMap.get(parentId) || []).filter(matchesSearch);
+    const childIds = children.map((c: any) => c.id);
+    onChange([...new Set([...selectedIds, ...childIds])]);
+  };
+
+  const deselectAllChildren = (parentId: string) => {
+    const children = (childrenMap.get(parentId) || []).filter(matchesSearch);
+    const childIds = new Set(children.map((c: any) => c.id));
+    onChange(selectedIds.filter((id) => !childIds.has(id)));
+  };
+
+  return (
+    <div className="space-y-2">
+      <span className="text-xs font-medium text-foreground">Serviços vinculados</span>
+
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Pesquisar serviço..."
+          className="w-full rounded-md border border-input bg-background pl-7 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+        />
+      </div>
+
+      {/* Global select/deselect */}
+      <div className="flex gap-2">
+        <button type="button" onClick={selectAll} className="text-[10px] text-primary hover:underline font-medium">
+          Selecionar todos
+        </button>
+        <span className="text-[10px] text-muted-foreground">|</span>
+        <button type="button" onClick={deselectAll} className="text-[10px] text-primary hover:underline font-medium">
+          Desmarcar todos
+        </button>
+      </div>
+
+      {/* Service list */}
+      <div className="max-h-52 overflow-y-auto border border-input rounded-md p-2 bg-background space-y-0.5">
+        {roots.length === 0 && (
+          <span className="text-xs text-muted-foreground">Nenhum serviço disponível</span>
+        )}
+        {roots.map((root) => {
+          const children = childrenMap.get(root.id) || [];
+          const hasChildren = children.length > 0;
+          const isMenu = root.tipo === "menu";
+          const rootMatchesSearch = matchesSearch(root);
+          const matchingChildren = children.filter(matchesSearch);
+
+          // Hide if search active and neither root nor any child matches
+          if (search && !rootMatchesSearch && matchingChildren.length === 0) return null;
+
+          if (hasChildren || isMenu) {
+            const expanded = expandedGroups.has(root.id) || (search.length > 0 && matchingChildren.length > 0);
+            const allChildrenSelected = matchingChildren.length > 0 && matchingChildren.every((c: any) => selectedIds.includes(c.id));
+
+            return (
+              <div key={root.id}>
+                {/* Parent / Group header */}
+                <div className="flex items-center gap-1 py-1 px-1 rounded hover:bg-muted/50 cursor-pointer" onClick={() => toggleGroup(root.id)}>
+                  {expanded ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
+                  <span className="text-xs font-medium flex-1">{root.nome}</span>
+                  {matchingChildren.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); allChildrenSelected ? deselectAllChildren(root.id) : selectAllChildren(root.id); }}
+                      className="text-[9px] text-primary hover:underline font-medium px-1"
+                    >
+                      {allChildrenSelected ? "Desmarcar" : "Todos"}
+                    </button>
+                  )}
+                </div>
+                {/* Children */}
+                {expanded && (
+                  <div className="ml-5 space-y-0.5">
+                    {matchingChildren.map((child: any) => (
+                      <label key={child.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/50 p-1 rounded">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.includes(child.id)}
+                          onChange={() => toggleItem(child.id)}
+                          className="h-3.5 w-3.5"
+                        />
+                        <span>{child.nome}</span>
+                      </label>
+                    ))}
+                    {matchingChildren.length === 0 && (
+                      <span className="text-[10px] text-muted-foreground ml-1">Nenhum subserviço encontrado</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // Standalone service (no children, not a menu)
+          if (!rootMatchesSearch) return null;
+          return (
+            <label key={root.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/50 p-1 rounded">
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(root.id)}
+                onChange={() => toggleItem(root.id)}
+                className="h-3.5 w-3.5"
+              />
+              <span>{root.nome}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Atendentes Tab ───────────────────────────────────────────────────────
 
 function AtendentesTab() {
   const { selectedSectorId } = useSector();
@@ -177,30 +388,18 @@ function AtendentesTab() {
     [selectedSectorId],
   );
 
-  const calendarios = useResource(
-    () => getCalendarsBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
+  const calendarActions = useGoogleCalendarActions(reload);
 
   const fields: FieldDef[] = [
     { name: "nome", label: "Nome", required: true },
     { name: "email", label: "E-mail institucional", type: "email", required: true, hint: "Deve ser @educacao.mg.gov.br" },
     { name: "telefone", label: "Telefone" },
     { name: "cargo", label: "Cargo" },
-    {
-      name: "calendario_id",
-      label: "Calendário vinculado",
-      type: "select",
-      options: calendarios.data.map((c: any) => ({ value: c.id, label: `${c.nome} (${c.google_calendar_id ?? "—"})` })),
-    },
-    {
-      name: "servicos_ids",
-      label: "Serviços vinculados",
-      type: "select-multiple",
-      options: servicos.data.map((s: any) => ({ value: s.id, label: s.nome })),
-    },
     { name: "ativo", label: "Ativo", type: "checkbox", defaultValue: true },
   ];
+
+  // State to pass servicos_ids changes from the picker back to the form
+  const [pickerOverride, setPickerOverride] = useState<string[] | null>(null);
 
   return (
     <Section>
@@ -225,12 +424,7 @@ function AtendentesTab() {
           {
             key: "google_connection",
             label: "Google Calendar",
-            render: (r) => {
-              const conn = r.google_connection;
-              if (conn?.status === "connected") return <span className="text-emerald-600 font-medium text-xs">Conectado</span>;
-              if (conn?.status === "error") return <span className="text-destructive font-medium text-xs">Erro</span>;
-              return <span className="text-muted-foreground text-xs">Não conectado</span>;
-            }
+            render: (r) => <GoogleCalendarCell row={r} actions={calendarActions} />,
           },
         ]}
         fields={fields}
@@ -243,15 +437,32 @@ function AtendentesTab() {
             : null
         }
         onSave={async (row) => {
-          const serviceIds = row.servicos_ids ?? [];
+          const serviceIds = pickerOverride ?? row.servicos_ids ?? [];
+          setPickerOverride(null);
           return await saveAttendantWithServices(row, serviceIds);
         }}
-        onChanged={reload}
-        renderFormExtra={(row) => <GoogleCalendarSection row={row} onDisconnect={reload} />}
+        onChanged={() => { setPickerOverride(null); reload(); }}
+        renderFormExtra={(row) => (
+          <>
+            <HierarchicalServicePicker
+              servicos={servicos.data}
+              selectedIds={pickerOverride ?? row.servicos_ids ?? []}
+              onChange={(ids) => {
+                setPickerOverride(ids);
+                // Also update the row in CrudTable's state via a workaround:
+                // We set pickerOverride which is read during onSave
+                row.servicos_ids = ids;
+              }}
+            />
+            <GoogleCalendarSection row={row} onDisconnect={reload} />
+          </>
+        )}
       />
     </Section>
   );
 }
+
+// ── Horários Tab ─────────────────────────────────────────────────────────
 
 function HorariosTab() {
   const { selectedSectorId } = useSector();
@@ -335,6 +546,8 @@ function HorariosTab() {
   );
 }
 
+// ── Exceções Tab ─────────────────────────────────────────────────────────
+
 function ExcecoesTab() {
   const { selectedSectorId } = useSector();
   const excecoes = useResource(
@@ -394,73 +607,6 @@ function ExcecoesTab() {
         error={excecoes.error}
         baseRow={{ setor_id: selectedSectorId }}
         onChanged={excecoes.reload}
-      />
-    </Section>
-  );
-}
-
-function CalendariosTab() {
-  const { selectedSectorId } = useSector();
-  const { data, error, loading, reload } = useResource(
-    () => getCalendarsBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
-  const fields: FieldDef[] = [
-    { name: "nome", label: "Nome do calendário", required: true },
-    { name: "google_calendar_id", label: "Google Calendar ID ou e-mail" },
-    {
-      name: "modo_conexao",
-      label: "Modo de conexão",
-      type: "select",
-      options: [
-        { value: "shared_with_n8n", label: "Compartilhado com n8n" },
-        { value: "node_oauth", label: "OAuth via backend" },
-      ],
-      defaultValue: "shared_with_n8n",
-    },
-    {
-      name: "status_conexao",
-      label: "Status",
-      type: "select",
-      options: [
-        { value: "pendente", label: "Pendente" },
-        { value: "conectado", label: "Conectado" },
-        { value: "erro", label: "Erro" },
-      ],
-      defaultValue: "pendente",
-    },
-    { name: "observacao", label: "Observação", type: "textarea" },
-    { name: "ativo", label: "Ativo", type: "checkbox", defaultValue: true },
-  ];
-  return (
-    <Section>
-      <div className="mb-4 rounded border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900 leading-relaxed">
-        <strong>Aviso:</strong> Use esta aba apenas para calendários gerais do setor. A agenda pessoal do Google de cada atendente deve ser conectada no momento do cadastro do próprio atendente na aba "Atendentes".
-      </div>
-      <CrudTable
-        title="Calendários do setor"
-        table="calendarios_setor"
-        rows={data}
-        columns={[
-          { key: "nome", label: "Nome" },
-          { key: "google_calendar_id", label: "ID / e-mail" },
-          {
-            key: "modo_conexao",
-            label: "Conexão",
-            render: (r) =>
-              r.modo_conexao === "shared_with_n8n"
-                ? "Compartilhado com n8n"
-                : r.modo_conexao === "node_oauth"
-                  ? "OAuth via backend"
-                  : r.modo_conexao ?? "—",
-          },
-          { key: "status_conexao", label: "Status" },
-        ]}
-        fields={fields}
-        loading={loading}
-        error={error}
-        baseRow={{ setor_id: selectedSectorId }}
-        onChanged={reload}
       />
     </Section>
   );

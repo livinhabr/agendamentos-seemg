@@ -236,6 +236,7 @@ export async function getAttendantServicesBySector(setorIds: string[]) {
 export async function saveAttendantWithServices(attendant: any, serviceIds: string[]) {
   const attendantData = { ...attendant };
   delete attendantData.servicos_ids;
+  delete attendantData.google_connection;
 
   const { data, error } = await upsertRow("atendentes", attendantData);
   if (error || !data) return { data, error };
