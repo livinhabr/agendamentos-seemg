@@ -52,7 +52,7 @@ function InicioPage() {
     { label: "Atendentes", value: counts.atendentes, icon: Users, to: "/equipe-agenda" },
     { label: "Horários", value: counts.horarios, icon: Clock, to: "/equipe-agenda" },
     { label: "Chat publicado", value: bot?.ativo === false ? "Não" : "Sim", icon: MessageSquare, to: "/chat-agendamento" },
-    { label: "Agendamentos", value: counts.agendamentos, icon: CalendarCheck, to: "/agendamentos" },
+    { label: "Agendamentos", value: counts.agendamentos, icon: CalendarCheck, to: "/chat-agendamento" },
   ];
 
   const steps = [

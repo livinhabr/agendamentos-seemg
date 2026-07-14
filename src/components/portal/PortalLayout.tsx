@@ -5,7 +5,7 @@ import {
   Building2,
   MessageSquare,
   Users,
-  CalendarCheck,
+
   Settings,
   Menu,
   X,
@@ -21,7 +21,7 @@ const NAV = [
   { to: "/meu-setor", label: "Meu Setor", icon: Building2 },
   { to: "/chat-agendamento", label: "Chat de Agendamento", icon: MessageSquare },
   { to: "/equipe-agenda", label: "Equipe e Agenda", icon: Users },
-  { to: "/agendamentos", label: "Agendamentos", icon: CalendarCheck },
+
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ] as const;
 
