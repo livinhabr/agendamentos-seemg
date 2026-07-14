@@ -36,14 +36,14 @@ function ChatAgendamentoPage() {
       />
       <Tabs defaultValue="servicos">
         <TabsList className="flex w-full flex-wrap">
-
+          <TabsTrigger value="agendamentos">Agendamentos</TabsTrigger>
           <TabsTrigger value="servicos">Serviços e documentos</TabsTrigger>
           <TabsTrigger value="faqs">Perguntas frequentes</TabsTrigger>
           <TabsTrigger value="campos">Campos do usuário</TabsTrigger>
           <TabsTrigger value="preview">Preview</TabsTrigger>
           <TabsTrigger value="publicar">Publicação</TabsTrigger>
         </TabsList>
-
+        <TabsContent value="agendamentos"><AgendamentosTab /></TabsContent>
         <TabsContent value="servicos"><ServicosTab /></TabsContent>
         <TabsContent value="faqs"><FaqsTab /></TabsContent>
         <TabsContent value="campos"><CamposTab /></TabsContent>
@@ -822,5 +822,164 @@ function PublicarTab() {
         </div>
       </Section>
     </div>
+  );
+}
+
+function AgendamentosTab() {
+  const { selectedSectorId } = useSector();
+  const [data, setData] = useState<any[]>([]);
+  const [error, setError] = useState<Error | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      if (!selectedSectorId) {
+        setData([]);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const { data: rows, error: err } = await supabase
+          .from("agendamentos")
+          .select(`
+            id, inicio, fim, status, nome_usuario, email_usuario, google_event_id,
+            servico:servicos_agendamento(nome),
+            atendente:atendentes(nome),
+            calendario:calendarios_setor(nome)
+          `)
+          .eq("setor_id", selectedSectorId)
+          .order("inicio", { ascending: false })
+          .limit(100);
+
+        if (err) throw err;
+        setData(rows || []);
+      } catch (err: any) {
+        setError(err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [selectedSectorId]);
+
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  const filteredData = data.filter((row: any) => {
+    if (statusFilter !== "all" && row.status !== statusFilter) return false;
+    return true;
+  });
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "confirmado":
+        return <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">Confirmado</span>;
+      case "pendente_google_calendar":
+        return <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">Pendente Google</span>;
+      case "confirmado_localmente":
+        return <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">Confirmado Local</span>;
+      case "erro_google_calendar":
+        return <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Erro Google</span>;
+      case "cancelado":
+        return <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-800">Cancelado</span>;
+      default:
+        return <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-800">{status}</span>;
+    }
+  };
+
+  const formatDate = (isoStr: string) => {
+    if (!isoStr) return "-";
+    const d = new Date(isoStr);
+    return d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+  };
+
+  return (
+    <Section>
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Acompanhamento de Agendamentos</h2>
+          <div className="flex gap-2">
+            <select
+              className="h-8 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="all">Todos os status</option>
+              <option value="confirmado">Confirmado</option>
+              <option value="pendente_google_calendar">Pendente Google</option>
+              <option value="erro_google_calendar">Erro Google</option>
+              <option value="confirmado_localmente">Confirmado Localmente</option>
+              <option value="cancelado">Cancelado</option>
+            </select>
+          </div>
+        </div>
+
+        {error && (
+          <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            <p className="font-medium">Não foi possível carregar os agendamentos. {error.message}</p>
+          </div>
+        )}
+
+        <div className="overflow-x-auto rounded-lg border border-border bg-card">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">Data/Hora</th>
+                <th className="px-3 py-2 font-medium">Usuário</th>
+                <th className="px-3 py-2 font-medium">Serviço / Atendente</th>
+                <th className="px-3 py-2 font-medium">Calendário</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center">
+                    <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
+                  </td>
+                </tr>
+              ) : filteredData.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center text-xs text-muted-foreground">
+                    Nenhum agendamento encontrado para este setor.
+                  </td>
+                </tr>
+              ) : (
+                filteredData.map((row: any) => (
+                  <tr key={row.id} className="border-t border-border hover:bg-muted/50 transition-colors">
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="font-medium">{formatDate(row.inicio)}</div>
+                      <div className="text-xs text-muted-foreground">até {formatDate(row.fim)}</div>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="font-medium">{row.nome_usuario || "Anônimo"}</div>
+                      <div className="text-xs text-muted-foreground">{row.email_usuario || "-"}</div>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="font-medium">{row.servico?.nome || "Serviço Desconhecido"}</div>
+                      <div className="text-xs text-muted-foreground">{row.atendente?.nome || "-"}</div>
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground text-xs">
+                      {row.calendario?.nome || "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex flex-col items-start gap-1">
+                        {getStatusBadge(row.status)}
+                        {row.google_event_id && (
+                          <span className="text-[10px] text-muted-foreground" title={row.google_event_id}>
+                            Google Event OK
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </Section>
   );
 }
