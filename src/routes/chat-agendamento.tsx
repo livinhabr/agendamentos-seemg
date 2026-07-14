@@ -14,7 +14,7 @@ import {
 } from "@/lib/data/agenda";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot as BotIcon, User, Loader2, Pencil, Trash2, Plus, FolderOpen, ChevronRight, Calendar } from "lucide-react";
+import { Bot as BotIcon, User, Loader2, Pencil, Trash2, Plus, FolderOpen, ChevronRight, Calendar, Search } from "lucide-react";
 import { sendChatMessage } from "@/lib/api/backend";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -61,6 +61,7 @@ function ServicosTab() {
     [selectedSectorId],
   );
   const [editing, setEditing] = useState<Record<string, any> | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
 
   // Organize data hierarchically: top-level first, then children grouped under parents
   const topLevel = data.filter((s: any) => !s.servico_pai_id);
@@ -68,25 +69,45 @@ function ServicosTab() {
     data.filter((s: any) => s.servico_pai_id === parentId);
 
   // Build ordered rows: parent, then its children, then next parent...
-  const orderedRows: any[] = [];
+  const allOrderedRows: any[] = [];
   for (const parent of topLevel) {
-    orderedRows.push(parent);
-    if (parent.tipo === "menu") {
-      for (const child of childrenOf(parent.id)) {
-        orderedRows.push(child);
-      }
+    allOrderedRows.push(parent);
+    for (const child of childrenOf(parent.id)) {
+      allOrderedRows.push(child);
     }
   }
   // Also include any orphaned children (parent deleted or mismatched)
-  const listedIds = new Set(orderedRows.map((r) => r.id));
+  const listedIds = new Set(allOrderedRows.map((r) => r.id));
   for (const row of data) {
-    if (!listedIds.has(row.id)) orderedRows.push(row);
+    if (!listedIds.has(row.id)) allOrderedRows.push(row);
   }
 
-  function startCreate(tipo: "menu" | "servico", parentId?: string) {
+  // Search filter — if a sub matches, include parent for context; if parent matches, include children
+  const orderedRows = searchTerm.trim()
+    ? (() => {
+        const q = searchTerm.trim().toLowerCase();
+        const match = (r: any) =>
+          (r.nome || "").toLowerCase().includes(q) ||
+          (r.categoria || "").toLowerCase().includes(q) ||
+          (r.descricao_curta || "").toLowerCase().includes(q);
+        const matchedIds = new Set(allOrderedRows.filter(match).map((r: any) => r.id));
+        // Expand: if child matched, add parent; if parent matched, add children
+        const visibleIds = new Set(matchedIds);
+        for (const id of matchedIds) {
+          const row = data.find((r: any) => r.id === id);
+          if (row?.servico_pai_id) visibleIds.add(row.servico_pai_id); // include parent
+          if (!row?.servico_pai_id) {
+            childrenOf(id).forEach((c: any) => visibleIds.add(c.id)); // include children
+          }
+        }
+        return allOrderedRows.filter((r: any) => visibleIds.has(r.id));
+      })()
+    : allOrderedRows;
+
+  function startCreate(parentId?: string) {
     setEditing({
       setor_id: selectedSectorId,
-      tipo,
+      tipo: "servico",
       servico_pai_id: parentId ?? null,
       nome: "",
       categoria: "",
@@ -106,15 +127,22 @@ function ServicosTab() {
   return (
     <Section>
       <div className="space-y-4">
-        {/* Header with split create buttons */}
+        {/* Header with search + create button */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-foreground">Serviços oferecidos</h2>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => startCreate("menu")} className="gap-1">
-              <FolderOpen className="h-3.5 w-3.5" /> Novo menu
-            </Button>
-            <Button size="sm" onClick={() => startCreate("servico")} className="gap-1">
-              <Calendar className="h-3.5 w-3.5" /> Novo serviço
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Pesquisar serviço..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="h-8 w-56 rounded-md border border-input bg-transparent pl-8 pr-3 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+            <Button size="sm" onClick={() => startCreate()} className="gap-1">
+              <Plus className="h-3.5 w-3.5" /> Novo serviço
             </Button>
           </div>
         </div>
@@ -131,7 +159,6 @@ function ServicosTab() {
             <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Nome</th>
-                <th className="px-3 py-2 font-medium">Tipo</th>
                 <th className="px-3 py-2 font-medium">Duração</th>
                 <th className="px-3 py-2 font-medium">Status</th>
                 <th className="px-3 py-2"></th>
@@ -147,14 +174,13 @@ function ServicosTab() {
               ) : orderedRows.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="p-6 text-center text-xs text-muted-foreground">
-                    Nenhum serviço cadastrado. Comece criando um menu ou serviço.
+                    Nenhum serviço cadastrado. Comece criando um serviço.
                   </td>
                 </tr>
               ) : (
                 orderedRows.map((row) => {
                   const isChild = !!row.servico_pai_id;
-                  const isMenu = row.tipo === "menu";
-                  const children = isMenu ? childrenOf(row.id) : [];
+                  const children = childrenOf(row.id);
                   return (
                     <tr key={row.id} className={`border-t border-border ${isChild ? "bg-muted/20" : ""}`}>
                       {/* Name column with hierarchy indentation */}
@@ -163,16 +189,13 @@ function ServicosTab() {
                           {isChild && (
                             <span className="text-xs text-muted-foreground">└─</span>
                           )}
-                          {isMenu && !isChild && (
-                            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-                          )}
-                          {!isMenu && !isChild && (
+                          {!isChild && (
                             <Calendar className="h-3.5 w-3.5 shrink-0 text-green-600" />
                           )}
                           <span className={isChild ? "text-muted-foreground" : "font-medium"}>
                             {row.nome}
                           </span>
-                          {isMenu && children.length > 0 && (
+                          {!isChild && children.length > 0 && (
                             <span className="ml-1 text-[10px] text-muted-foreground">
                               ({children.length} sub)
                             </span>
@@ -180,20 +203,9 @@ function ServicosTab() {
                         </div>
                       </td>
 
-                      {/* Type badge */}
-                      <td className="px-3 py-2 align-top">
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                          isMenu
-                            ? "bg-blue-50 text-blue-700 border border-blue-200"
-                            : "bg-green-50 text-green-700 border border-green-200"
-                        }`}>
-                          {isMenu ? "Menu" : "Serviço"}
-                        </span>
-                      </td>
-
                       {/* Duration */}
                       <td className="px-3 py-2 align-top text-muted-foreground">
-                        {isMenu ? "—" : `${row.duracao_minutos ?? 30} min`}
+                        {`${row.duracao_minutos ?? 30} min`}
                       </td>
 
                       {/* Active status */}
@@ -206,12 +218,12 @@ function ServicosTab() {
                       {/* Actions */}
                       <td className="px-3 py-2 text-right align-top">
                         <div className="flex items-center justify-end gap-1">
-                          {isMenu && (
+                          {!isChild && (
                             <Button
                               variant="ghost"
                               size="sm"
                               className="gap-1 text-xs text-blue-600 hover:text-blue-700"
-                              onClick={() => startCreate("servico", row.id)}
+                              onClick={() => startCreate(row.id)}
                               title="Adicionar subserviço"
                             >
                               <Plus className="h-3 w-3" /> Subserviço
@@ -226,7 +238,7 @@ function ServicosTab() {
                             onClick={async () => {
                               const hasChildren = data.some((s: any) => s.servico_pai_id === row.id);
                               if (hasChildren) {
-                                alert("Remova os subserviços antes de excluir este menu.");
+                                alert("Remova os subserviços antes de excluir este serviço.");
                                 return;
                               }
                               if (!confirm("Excluir este registro?")) return;
@@ -257,7 +269,7 @@ function ServicosTab() {
           onSaved={() => { setEditing(null); reload(); }}
           onCreateSubservico={(parentId) => {
             setEditing(null);
-            setTimeout(() => startCreate("servico", parentId), 50);
+            setTimeout(() => startCreate(parentId), 50);
           }}
         />
       )}
@@ -284,15 +296,15 @@ function ServicoFormModal({
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const isEditing = !!values.id;
-  const isMenu = values.tipo === "menu";
+  const isChild = !!values.servico_pai_id;
 
-  // Menu options for the "pai" select: only tipo=menu items, excluding self
-  const menuOptions = allServices
-    .filter((s: any) => s.tipo === "menu" && s.id !== values.id)
+  // Parent options: any top-level service, excluding self
+  const parentOptions = allServices
+    .filter((s: any) => !s.servico_pai_id && s.id !== values.id)
     .map((s: any) => ({ value: s.id, label: s.nome }));
 
-  // Subservices of this menu (when editing a menu)
-  const subservicos = isEditing && isMenu
+  // Subservices of this service (when editing a top-level service)
+  const subservicos = isEditing && !isChild
     ? allServices.filter((s: any) => s.servico_pai_id === values.id)
     : [];
 
@@ -308,11 +320,8 @@ function ServicoFormModal({
     const toSave = { ...values };
     // Normalize empty strings to null
     if (toSave.servico_pai_id === "") toSave.servico_pai_id = null;
-    if (!toSave.tipo) toSave.tipo = "servico";
-    // Menus don't need scheduling fields — clear them if menu
-    if (toSave.tipo === "menu") {
-      toSave.servico_pai_id = null;
-    }
+    // Always set tipo to "servico" (menu distinction removed)
+    toSave.tipo = "servico";
 
     const { error } = await upsertRow("servicos_agendamento", toSave);
     setSaving(false);
@@ -331,70 +340,44 @@ function ServicoFormModal({
       <div className="w-full max-w-lg rounded-lg border border-border bg-card shadow-xl">
         <div className="border-b border-border px-5 py-3">
           <h3 className="text-base font-semibold text-foreground">
-            {isEditing ? `Editar: ${row.nome}` : (isMenu ? "Novo menu" : "Novo serviço")}
+            {isEditing ? `Editar: ${row.nome}` : (isChild ? "Novo subserviço" : "Novo serviço")}
           </h3>
         </div>
         <form onSubmit={handleSubmit} className="space-y-3 px-5 py-4 max-h-[70vh] overflow-y-auto">
 
-          {/* ── Tipo selector ───────────────────────────────── */}
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-foreground">
-              Este item será: <span className="text-destructive">*</span>
-            </span>
-            <select
-              className={inputClass}
-              value={values.tipo ?? "servico"}
-              onChange={(e) => set("tipo", e.target.value)}
-              required
-            >
-              <option value="servico">Serviço agendável — permite agendamento</option>
-              <option value="menu">Menu/assunto principal — apenas agrupa subserviços</option>
-            </select>
-          </label>
-
-          {/* ── Helper text for menu ─────────────────────────── */}
-          {isMenu && (
-            <div className="rounded border border-blue-200 bg-blue-50 p-2.5 text-xs text-blue-700">
-              <FolderOpen className="mr-1 inline-block h-3.5 w-3.5" />
-              Menus não são agendáveis diretamente. Eles aparecem no chat para organizar subserviços.
-            </div>
-          )}
-
           {/* ── Nome ────────────────────────────────────────── */}
           <label className="block space-y-1">
             <span className="text-xs font-medium text-foreground">
-              {isMenu ? "Nome do menu" : "Nome do serviço"} <span className="text-destructive">*</span>
+              Nome do serviço <span className="text-destructive">*</span>
             </span>
             <input
               className={inputClass}
               value={values.nome ?? ""}
               onChange={(e) => set("nome", e.target.value)}
               required
-              placeholder={isMenu ? "Ex.: Aposentadoria" : "Ex.: Aposentadoria por idade"}
+              placeholder="Ex.: Aposentadoria por idade"
             />
           </label>
 
           {/* ── Parent select (only for tipo = servico) ──────── */}
-          {!isMenu && (
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-foreground">
-                Este serviço pertence a algum menu?
-              </span>
-              <select
-                className={inputClass}
-                value={values.servico_pai_id ?? ""}
-                onChange={(e) => set("servico_pai_id", e.target.value || null)}
-              >
-                <option value="">Não, aparece no menu inicial</option>
-                {menuOptions.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-              <span className="block text-[11px] text-muted-foreground">
-                Selecione um menu para tornar este serviço um subserviço.
-              </span>
-            </label>
-          )}
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">
+              Serviço pai (opcional)
+            </span>
+            <select
+              className={inputClass}
+              value={values.servico_pai_id ?? ""}
+              onChange={(e) => set("servico_pai_id", e.target.value || null)}
+            >
+              <option value="">Nenhum — serviço principal</option>
+              {parentOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <span className="block text-[11px] text-muted-foreground">
+              Selecione um serviço para tornar este um subserviço.
+            </span>
+          </label>
 
           {/* ── Categoria ───────────────────────────────────── */}
           <label className="block space-y-1">
@@ -424,9 +407,8 @@ function ServicoFormModal({
             />
           </label>
 
-          {/* ── Scheduling fields (hidden/optional for menus) ── */}
-          {!isMenu && (
-            <>
+          {/* ── Scheduling fields ──────────────────────────────── */}
+          <>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block space-y-1">
                   <span className="text-xs font-medium text-foreground">Duração (minutos)</span>
@@ -489,8 +471,7 @@ function ServicoFormModal({
                   Liste os documentos e orientações que o usuário deve trazer.
                 </span>
               </label>
-            </>
-          )}
+          </>
 
           {/* ── Order & Active ─────────────────────────────── */}
           <div className="grid grid-cols-2 gap-3">
@@ -515,11 +496,11 @@ function ServicoFormModal({
           </div>
 
           {/* ── Subservices section (when editing a menu) ──── */}
-          {isEditing && isMenu && (
+          {isEditing && !isChild && (
             <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-semibold text-foreground">
-                  Subserviços deste menu ({subservicos.length})
+                  Subserviços ({subservicos.length})
                 </h4>
                 <Button
                   type="button"
