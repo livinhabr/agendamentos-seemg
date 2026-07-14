@@ -91,9 +91,7 @@ function ServicosTab() {
         const q = normalizeSearchText(searchTerm);
         const match = (r: any) =>
           normalizeSearchText(r.nome).includes(q) ||
-          normalizeSearchText(r.categoria).includes(q) ||
-          normalizeSearchText(r.descricao_curta).includes(q) ||
-          normalizeSearchText(r.descricao_para_usuario).includes(q);
+          normalizeSearchText(r.categoria).includes(q);
         const matchedIds = new Set(allOrderedRows.filter(match).map((r: any) => r.id));
         // Expand: if child matched, add parent; if parent matched, add children
         const visibleIds = new Set(matchedIds);
