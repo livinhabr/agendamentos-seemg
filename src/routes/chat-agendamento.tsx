@@ -83,13 +83,17 @@ function ServicosTab() {
   }
 
   // Search filter — if a sub matches, include parent for context; if parent matches, include children
+  const normalizeSearchText = (value: string) =>
+    String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
   const orderedRows = searchTerm.trim()
     ? (() => {
-        const q = searchTerm.trim().toLowerCase();
+        const q = normalizeSearchText(searchTerm);
         const match = (r: any) =>
-          (r.nome || "").toLowerCase().includes(q) ||
-          (r.categoria || "").toLowerCase().includes(q) ||
-          (r.descricao_curta || "").toLowerCase().includes(q);
+          normalizeSearchText(r.nome).includes(q) ||
+          normalizeSearchText(r.categoria).includes(q) ||
+          normalizeSearchText(r.descricao_curta).includes(q) ||
+          normalizeSearchText(r.descricao_para_usuario).includes(q);
         const matchedIds = new Set(allOrderedRows.filter(match).map((r: any) => r.id));
         // Expand: if child matched, add parent; if parent matched, add children
         const visibleIds = new Set(matchedIds);
