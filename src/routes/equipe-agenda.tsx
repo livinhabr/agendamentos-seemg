@@ -880,9 +880,44 @@ function ExcecoesTab() {
         table="excecoes_atendimento"
         rows={excecoes.data}
         columns={[
-          { key: "tipo", label: "Tipo" },
-          { key: "data_inicio", label: "Início" },
-          { key: "data_fim", label: "Fim" },
+          {
+            key: "tipo",
+            label: "Tipo",
+            render: (r) => (
+              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium border ${
+                r.tipo === "bloqueio"
+                  ? "bg-red-50 text-red-700 border-red-200"
+                  : "bg-emerald-50 text-emerald-700 border-emerald-200"
+              }`}>
+                {r.tipo === "bloqueio" ? "Bloqueio" : "Janela extra"}
+              </span>
+            ),
+          },
+          {
+            key: "atendente_id",
+            label: "Atendente",
+            render: (r) => {
+              const att = (atendentes.data as any[]).find((a: any) => a.id === r.atendente_id);
+              return att ? att.nome : <span className="text-muted-foreground text-xs">Todos</span>;
+            },
+          },
+          {
+            key: "data_inicio",
+            label: "Período",
+            render: (r) => {
+              const fmt = (iso: string) => {
+                if (!iso) return "—";
+                const d = new Date(iso);
+                return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })
+                  + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+              };
+              return (
+                <span className="text-xs whitespace-nowrap">
+                  {fmt(r.data_inicio)} → {fmt(r.data_fim)}
+                </span>
+              );
+            },
+          },
           { key: "motivo", label: "Motivo" },
         ]}
         fields={fields}
