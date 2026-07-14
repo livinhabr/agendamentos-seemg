@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Loader2, Calendar, Search, ChevronDown, ChevronRight } from "lucide-react";
+import { Loader2, Calendar, Search, ChevronDown, ChevronRight, Plus, Pencil, Trash2 } from "lucide-react";
 import { PortalLayout, PageHeader, Section } from "@/components/portal/PortalLayout";
 import { CrudTable, type FieldDef } from "@/components/portal/CrudTable";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,8 @@ import {
   isInstitutionalEmail,
   getAttendantServicesBySector,
   saveAttendantWithServices,
+  upsertRow,
+  deleteRow,
 } from "@/lib/data/agenda";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -462,87 +464,368 @@ function AtendentesTab() {
   );
 }
 
-// ── Horários Tab ─────────────────────────────────────────────────────────
+// ── Horários Tab (agrupado por atendente) ────────────────────────────────
+
+const DIAS_SEMANA_ORDEM = [1, 2, 3, 4, 5, 6, 0]; // Seg→Dom
+
+const TIPOS_JANELA = [
+  { value: "trabalho", label: "Trabalho" },
+  { value: "almoco", label: "Almoço" },
+  { value: "pausa", label: "Pausa" },
+  { value: "bloqueio", label: "Bloqueio" },
+];
+
+function normalizeSearchText(value: string) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
 
 function HorariosTab() {
   const { selectedSectorId } = useSector();
-  const horarios = useResource(
-    () => getSchedulesBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
-  const atendentes = useResource(
-    () => getAttendantsBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
-  const servicos = useResource(
-    () => getServicesBySector(selectedSectorId ? [selectedSectorId] : []),
-    [selectedSectorId],
-  );
-  const TIPOS = [
-    { value: "trabalho", label: "Trabalho" },
-    { value: "almoco", label: "Almoço" },
-    { value: "pausa", label: "Pausa" },
-    { value: "bloqueio", label: "Bloqueio" },
-  ];
-  const fields: FieldDef[] = [
-    { name: "dia_semana", label: "Dia da semana", type: "select", required: true, options: DIAS },
-    {
-      name: "atendente_id",
-      label: "Atendente",
-      type: "select",
-      options: atendentes.data.map((a: any) => ({ value: a.id, label: a.nome })),
-    },
-    {
-      name: "servico_id",
-      label: "Serviço",
-      type: "select",
-      options: servicos.data.map((s: any) => ({ value: s.id, label: s.nome })),
-    },
-    {
-      name: "tipo_janela",
-      label: "Tipo de janela",
-      type: "select",
-      required: true,
-      options: TIPOS,
-      defaultValue: "trabalho",
-    },
-    { name: "hora_inicio", label: "Hora início", type: "time", required: true },
-    { name: "hora_fim", label: "Hora fim", type: "time", required: true },
-    { name: "timezone", label: "Timezone", defaultValue: "America/Sao_Paulo" },
-    { name: "ativo", label: "Ativo", type: "checkbox", defaultValue: true },
-  ];
+  const setorIds = selectedSectorId ? [selectedSectorId] : [];
+
+  const atendentes = useResource(() => getAttendantsBySector(setorIds), [selectedSectorId]);
+  const horarios = useResource(() => getSchedulesBySector(setorIds), [selectedSectorId]);
+  const servicos = useResource(() => getServicesBySector(setorIds), [selectedSectorId]);
+  const attServicos = useResource(() => getAttendantServicesBySector(setorIds), [selectedSectorId]);
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [editing, setEditing] = useState<Record<string, any> | null>(null);
+
+  const reloadAll = () => { horarios.reload(); atendentes.reload(); };
+
+  // Build attendant → services map
+  const attServiceNames = (attId: string) => {
+    const links = (attServicos.data || []).filter((l: any) => l.atendente_id === attId);
+    return links.map((l: any) => servicos.data.find((s: any) => s.id === l.servico_id)?.nome).filter(Boolean);
+  };
+
+  // Filter attendants by search
+  const filteredAtendentes = (atendentes.data || []).filter((att: any) => {
+    if (!searchTerm.trim()) return true;
+    const q = normalizeSearchText(searchTerm);
+    const searchable = [att.nome, att.email, att.cargo, ...attServiceNames(att.id)]
+      .map(normalizeSearchText).join(" ");
+    return searchable.includes(q);
+  });
+
+  // Group horarios by atendente
+  const horariosByAtendente = (attId: string) =>
+    (horarios.data || []).filter((h: any) => h.atendente_id === attId);
+
+  // Group by dia_semana and sort
+  const groupByDia = (janelasList: any[]) => {
+    const map = new Map<number, any[]>();
+    for (const j of janelasList) {
+      const dia = Number(j.dia_semana);
+      if (!map.has(dia)) map.set(dia, []);
+      map.get(dia)!.push(j);
+    }
+    // Sort within each day by hora_inicio
+    for (const arr of map.values()) {
+      arr.sort((a: any, b: any) => (a.hora_inicio || "").localeCompare(b.hora_inicio || ""));
+    }
+    return map;
+  };
+
+  const getDiaLabel = (dia: number) => DIAS.find(d => d.value === String(dia))?.label ?? `Dia ${dia}`;
+
+  const isLoading = atendentes.loading || horarios.loading;
+
+  function startCreate(atendenteId: string) {
+    setEditing({
+      setor_id: selectedSectorId,
+      atendente_id: atendenteId,
+      dia_semana: "1",
+      tipo_janela: "trabalho",
+      hora_inicio: "09:00",
+      hora_fim: "12:00",
+      timezone: "America/Sao_Paulo",
+      ativo: true,
+    });
+  }
+
   return (
     <Section>
-      <CrudTable
-        title="Grade semanal de atendimento"
-        table="janelas_atendimento"
-        rows={horarios.data}
-        columns={[
-          {
-            key: "dia_semana",
-            label: "Dia",
-            render: (r) => DIAS.find((d) => d.value === String(r.dia_semana))?.label ?? r.dia_semana,
-          },
-          { key: "tipo_janela", label: "Tipo" },
-          { key: "hora_inicio", label: "Início → Fim", render: (r) => `${r.hora_inicio ?? "—"} → ${r.hora_fim ?? "—"}` },
-          {
-            key: "atendente_id",
-            label: "Atendente",
-            render: (r) => ((atendentes.data as any[]) || []).find((a: any) => a.id === r.atendente_id)?.nome ?? "—",
-          },
-        ]}
-        fields={fields}
-        loading={horarios.loading}
-        error={horarios.error}
-        baseRow={{ setor_id: selectedSectorId }}
-        validate={(row) => {
-          if (!row.hora_inicio || !row.hora_fim) return "Informe os horários.";
-          if (row.hora_fim <= row.hora_inicio) return "Hora fim deve ser maior que hora início.";
-          return null;
-        }}
-        onChanged={horarios.reload}
-      />
+      <div className="space-y-4">
+        {/* Header with search */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Horários e pausas</h2>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Pesquisar atendente..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="h-8 w-56 rounded-md border border-input bg-transparent pl-8 pr-3 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : filteredAtendentes.length === 0 ? (
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            {searchTerm.trim() ? "Nenhum atendente encontrado." : "Nenhum atendente cadastrado neste setor."}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {filteredAtendentes.map((att: any) => {
+              const janelas = horariosByAtendente(att.id);
+              const diaMap = groupByDia(janelas);
+              const serviceNames = attServiceNames(att.id);
+              const conn = att.google_connection;
+
+              return (
+                <div key={att.id} className="rounded-lg border border-border bg-card overflow-hidden">
+                  {/* Attendant header */}
+                  <div className="border-b border-border bg-muted/30 px-4 py-3 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-semibold text-foreground">{att.nome}</h3>
+                      {conn?.status === "connected" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 border border-emerald-200">
+                          <Calendar className="h-3 w-3" /> Conectado
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2 py-0.5 text-[10px] font-medium text-gray-500 border border-gray-200">
+                          <Calendar className="h-3 w-3" /> Não conectado
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
+                      {att.email && <span>{att.email}</span>}
+                      {att.cargo && <span>· {att.cargo}</span>}
+                    </div>
+                    {serviceNames.length > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground/70">Serviços:</span>{" "}
+                        {serviceNames.join(", ")}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Schedules by day */}
+                  <div className="px-4 py-3 space-y-2">
+                    {janelas.length === 0 ? (
+                      <p className="text-xs text-muted-foreground italic">Nenhum horário configurado.</p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {DIAS_SEMANA_ORDEM.map((dia) => {
+                          const daySlots = diaMap.get(dia);
+                          if (!daySlots || daySlots.length === 0) return null;
+                          return (
+                            <div key={dia} className="flex items-start gap-2 text-xs">
+                              <span className="w-16 shrink-0 font-medium text-foreground/80 pt-0.5">
+                                {getDiaLabel(dia)}
+                              </span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {daySlots.map((slot: any) => {
+                                  const isPause = slot.tipo_janela !== "trabalho";
+                                  return (
+                                    <span
+                                      key={slot.id}
+                                      className={`inline-flex items-center gap-1 rounded px-2 py-0.5 border ${
+                                        isPause
+                                          ? "bg-amber-50 text-amber-700 border-amber-200"
+                                          : "bg-blue-50 text-blue-700 border-blue-200"
+                                      } ${!slot.ativo ? "opacity-50 line-through" : ""}`}
+                                    >
+                                      {slot.hora_inicio}–{slot.hora_fim}
+                                      {isPause && <span className="text-[9px]">({slot.tipo_janela})</span>}
+                                      <button
+                                        onClick={() => setEditing({ ...slot })}
+                                        className="ml-0.5 hover:text-blue-900"
+                                        title="Editar"
+                                      >
+                                        <Pencil className="h-2.5 w-2.5" />
+                                      </button>
+                                      <button
+                                        onClick={async () => {
+                                          if (!confirm("Excluir esta janela?")) return;
+                                          await deleteRow("janelas_atendimento", slot.id);
+                                          reloadAll();
+                                        }}
+                                        className="hover:text-red-700"
+                                        title="Excluir"
+                                      >
+                                        <Trash2 className="h-2.5 w-2.5" />
+                                      </button>
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 gap-1 text-xs"
+                      onClick={() => startCreate(att.id)}
+                    >
+                      <Plus className="h-3 w-3" /> Adicionar horário
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Modal */}
+      {editing && (
+        <HorarioFormModal
+          row={editing}
+          atendentes={atendentes.data}
+          servicos={servicos.data}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); reloadAll(); }}
+        />
+      )}
     </Section>
+  );
+}
+
+function HorarioFormModal({
+  row,
+  atendentes,
+  servicos,
+  onClose,
+  onSaved,
+}: {
+  row: Record<string, any>;
+  atendentes: any[];
+  servicos: any[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, any>>({ ...row });
+  const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const isEditing = !!values.id;
+
+  function set(key: string, val: any) {
+    setValues((p) => ({ ...p, [key]: val }));
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!values.hora_inicio || !values.hora_fim) {
+      setErrorMsg("Informe os horários.");
+      return;
+    }
+    if (values.hora_fim <= values.hora_inicio) {
+      setErrorMsg("Hora fim deve ser maior que hora início.");
+      return;
+    }
+    setSaving(true);
+    setErrorMsg(null);
+
+    const toSave = { ...values };
+    if (toSave.servico_id === "") toSave.servico_id = null;
+    if (!toSave.timezone) toSave.timezone = "America/Sao_Paulo";
+
+    const { error } = await upsertRow("janelas_atendimento", toSave);
+    setSaving(false);
+    if (error) {
+      setErrorMsg(error.message ?? "Erro ao salvar.");
+      return;
+    }
+    onSaved();
+  }
+
+  const inputClass =
+    "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-lg border border-border bg-card shadow-xl">
+        <div className="border-b border-border px-5 py-3">
+          <h3 className="text-base font-semibold text-foreground">
+            {isEditing ? "Editar horário" : "Novo horário"}
+          </h3>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-3 px-5 py-4 max-h-[70vh] overflow-y-auto">
+
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">Atendente <span className="text-destructive">*</span></span>
+            <select className={inputClass} value={values.atendente_id ?? ""} onChange={(e) => set("atendente_id", e.target.value)} required>
+              <option value="">Selecione...</option>
+              {atendentes.map((a: any) => (
+                <option key={a.id} value={a.id}>{a.nome}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">Dia da semana <span className="text-destructive">*</span></span>
+              <select className={inputClass} value={values.dia_semana ?? "1"} onChange={(e) => set("dia_semana", e.target.value)} required>
+                {DIAS.map((d) => (
+                  <option key={d.value} value={d.value}>{d.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">Tipo <span className="text-destructive">*</span></span>
+              <select className={inputClass} value={values.tipo_janela ?? "trabalho"} onChange={(e) => set("tipo_janela", e.target.value)} required>
+                {TIPOS_JANELA.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">Hora início <span className="text-destructive">*</span></span>
+              <input type="time" className={inputClass} value={values.hora_inicio ?? ""} onChange={(e) => set("hora_inicio", e.target.value)} required />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-foreground">Hora fim <span className="text-destructive">*</span></span>
+              <input type="time" className={inputClass} value={values.hora_fim ?? ""} onChange={(e) => set("hora_fim", e.target.value)} required />
+            </label>
+          </div>
+
+          <label className="block space-y-1">
+            <span className="text-xs font-medium text-foreground">Serviço específico (opcional)</span>
+            <select className={inputClass} value={values.servico_id ?? ""} onChange={(e) => set("servico_id", e.target.value || null)}>
+              <option value="">Todos os serviços</option>
+              {servicos.map((s: any) => (
+                <option key={s.id} value={s.id}>{s.nome}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={!!values.ativo} onChange={(e) => set("ativo", e.target.checked)} className="h-4 w-4" />
+            <span className="text-xs font-medium text-foreground">Ativo</span>
+          </label>
+
+          {errorMsg && (
+            <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+              {errorMsg}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancelar
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+              Salvar
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
