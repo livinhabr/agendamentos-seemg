@@ -186,9 +186,17 @@ export async function getAppointmentsBySector(setorIds: string[]) {
 
 // Upserts genéricos. Não usam service_role: dependem da sessão + RLS.
 export async function upsertRow(table: string, row: Record<string, any>, idColumn = "id") {
-  if (row[idColumn]) {
-    const id = row[idColumn];
-    const update = { ...row };
+  // Sanitize empty strings on UUID columns (keys ending in _id) to null
+  const sanitized = { ...row };
+  for (const key of Object.keys(sanitized)) {
+    if (key.endsWith("_id") && key !== idColumn && sanitized[key] === "") {
+      sanitized[key] = null;
+    }
+  }
+
+  if (sanitized[idColumn]) {
+    const id = sanitized[idColumn];
+    const update = { ...sanitized };
     delete update[idColumn];
     const { data, error } = await db
       .from(table)
@@ -198,7 +206,7 @@ export async function upsertRow(table: string, row: Record<string, any>, idColum
       .maybeSingle();
     return { data, error: toErr(error) };
   }
-  const { data, error } = await db.from(table).insert(row).select().maybeSingle();
+  const { data, error } = await db.from(table).insert(sanitized).select().maybeSingle();
   return { data, error: toErr(error) };
 }
 
