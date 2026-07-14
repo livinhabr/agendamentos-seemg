@@ -325,22 +325,28 @@ async function buildAvailabilityContext(
         
       if (!atendentes || atendentes.length === 0) return [];
       
-      // Filter by active Google Connections
+      // Filter by active Google Connections (include google_email)
       const { data: connections } = await supabaseAdmin
         .from("atendente_google_connections")
-        .select("atendente_id, calendar_id")
+        .select("atendente_id, calendar_id, google_email")
         .in("atendente_id", attendantIds)
         .eq("status", "connected");
         
-      const connectedSet = new Map<string, string>();
+      const connMap = new Map<string, { calendar_id: string; google_email: string | null }>();
       if (connections) {
-        connections.forEach(c => connectedSet.set(c.atendente_id, c.calendar_id || "primary"));
+        connections.forEach(c => connMap.set(c.atendente_id, {
+          calendar_id: c.calendar_id || "primary",
+          google_email: c.google_email || null,
+        }));
       }
       
-      // Map to include the specific calendar_id for freebusy check
+      // Map to include the specific calendar_id and google_email for freebusy check
       return atendentes
-        .filter(a => connectedSet.has(a.id))
-        .map(a => ({ ...a, google_calendar_id: connectedSet.get(a.id) }));
+        .filter(a => connMap.has(a.id))
+        .map(a => {
+          const conn = connMap.get(a.id)!;
+          return { ...a, google_calendar_id: conn.calendar_id, google_email: conn.google_email };
+        });
     }),
 
     // C. Sector calendars
@@ -488,6 +494,15 @@ async function buildAvailabilityContext(
 
 // ── Slot generation engine ───────────────────────────────────────────────
 
+interface SlotAttendant {
+  atendente_id: string;
+  atendente_nome: string;
+  atendente_email: string | null;
+  calendario_id: string | null;
+  google_email: string | null;
+  oauth_calendar_id: string;
+}
+
 interface Slot {
   id: number;
   inicio: string;
@@ -496,12 +511,9 @@ interface Slot {
   atendente_nome?: string;
   atendente_email?: string | null;
   calendario_id?: string | null;
-  atendentes_livres?: {
-    atendente_id: string;
-    atendente_nome: string;
-    atendente_email: string | null;
-    calendario_id: string | null;
-  }[];
+  google_email?: string | null;
+  oauth_calendar_id?: string;
+  atendentes_livres?: SlotAttendant[];
 }
 
 /**
@@ -524,11 +536,17 @@ function generateAvailableSlots(
   const now = new Date();
   const minTime = new Date(now.getTime() + antecedenciaMinH * 60 * 60 * 1000);
 
-  // Map atendentes to their calendario_id and email
-  const atendenteMap = new Map<string, { nome: string; email: string | null; calendario_id: string | null }>();
+  // Map atendentes to their calendario_id, email, google_calendar_id and google_email
+  const atendenteMap = new Map<string, { nome: string; email: string | null; calendario_id: string | null; google_calendar_id: string; google_email: string | null }>();
   for (const att of avail.atendentes_servico) {
     const a = att as Record<string, unknown>;
-    atendenteMap.set(a.id as string, { nome: a.nome as string, email: (a.email as string | null) ?? null, calendario_id: (a.calendario_id as string | null) ?? null });
+    atendenteMap.set(a.id as string, {
+      nome: a.nome as string,
+      email: (a.email as string | null) ?? null,
+      calendario_id: (a.calendario_id as string | null) ?? null,
+      google_calendar_id: (a.google_calendar_id as string) || "primary",
+      google_email: (a.google_email as string | null) ?? null,
+    });
   }
 
   // Build a set of attendant IDs linked to this service
@@ -643,11 +661,13 @@ function generateAvailableSlots(
             const isoStart = new Date(slotStart).toISOString();
             const existingSlot = rawSlots.find(s => s.inicio === isoStart);
             
-            const freeAtt = {
+            const freeAtt: SlotAttendant = {
               atendente_id: atendenteId,
               atendente_nome: attInfo?.nome ?? "Atendente",
               atendente_email: attInfo?.email ?? null,
               calendario_id: calendarioId,
+              google_email: attInfo?.google_email ?? null,
+              oauth_calendar_id: attInfo?.google_calendar_id ?? "primary",
             };
 
             if (existingSlot) {
@@ -987,16 +1007,32 @@ Confirma este agendamento?
           }
 
           // Resolve attendant from pool
-          const pool = selectedSlot.atendentes_livres || [];
+          const pool: SlotAttendant[] = selectedSlot.atendentes_livres || [];
           if (pool.length === 0) {
             if (selectedSlot.atendente_id) {
               pool.push({
                 atendente_id: selectedSlot.atendente_id,
                 atendente_nome: selectedSlot.atendente_nome || "Atendente",
                 atendente_email: selectedSlot.atendente_email || null,
-                calendario_id: selectedSlot.calendario_id || null
+                calendario_id: selectedSlot.calendario_id || null,
+                google_email: selectedSlot.google_email || null,
+                oauth_calendar_id: selectedSlot.oauth_calendar_id || "primary",
               });
             }
+          }
+
+          if (pool.length === 0) {
+            logger.warn({ slot: selectedSlot.id }, "Hor\u00e1rio sem atendente vinculado no pool.");
+            const reason = "Hor\u00e1rio n\u00e3o possui atendente vinculado. Por favor, escolha outro hor\u00e1rio.";
+            if (conversaId) {
+              await saveMessage(conversaId, "assistente", reason, {}, logger);
+            }
+            return new Response(JSON.stringify({
+              reply: reason,
+              conversation_id: conversaId ?? body.session_id,
+              conversation_state: { ...conversationState, etapa: "aguardando_horario" },
+              status: "ok",
+            }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
           // Fetch day appointments to balance load
@@ -1030,37 +1066,41 @@ Confirma este agendamento?
           let realGoogleCalendarId = undefined;
 
           for (const candidate of pool) {
-            // 1. Local Conflict Check (Supabase)
+            // 1. Local Conflict Check (Supabase) \u2014 by atendente_id, not calendario_id
             const { data: localConflicts } = await supabaseAdmin
               .from("agendamentos")
               .select("id")
-              .eq("calendario_id", candidate.calendario_id)
+              .eq("atendente_id", candidate.atendente_id)
               .lt("inicio", selectedSlot.fim)
               .gt("fim", selectedSlot.inicio)
               .in("status", ["pendente_google_calendar", "confirmado", "confirmado_localmente"]);
 
-            if (localConflicts && localConflicts.length > 0) continue;
+            if (localConflicts && localConflicts.length > 0) {
+              logger.info({ atendente_id: candidate.atendente_id, conflicts: localConflicts.length }, "Atendente com conflito local, pulando.");
+              continue;
+            }
 
-            // Determine the actual google_calendar_id
-            const calDef = availability_context?.calendarios?.find((c) => c.id === candidate.calendario_id);
-            const candGCalId = calDef?.google_calendar_id as string | undefined;
+            // 2. Use the OAuth calendar_id from the attendant's Google connection
+            //    This is typically "primary" \u2014 the attendant's own calendar
+            const candOAuthCalId = candidate.oauth_calendar_id || "primary";
 
-            // 2. Google Calendar Conflict Check (FreeBusy)
-            if (candGCalId) {
-              const gcalAvail = await checkCalendarAvailability({
-                atendente_id: candidate.atendente_id,
-                calendarId: candGCalId,
-                start: selectedSlot.inicio,
-                end: selectedSlot.fim,
-                timezone: "America/Sao_Paulo",
-                logger: logger,
-              });
+            // 3. Google Calendar Conflict Check (FreeBusy) using OAuth calendar
+            const gcalAvail = await checkCalendarAvailability({
+              atendente_id: candidate.atendente_id,
+              calendarId: candOAuthCalId,
+              start: selectedSlot.inicio,
+              end: selectedSlot.fim,
+              timezone: "America/Sao_Paulo",
+              logger: logger,
+            });
 
-              if (!gcalAvail.available) continue;
+            if (!gcalAvail.available) {
+              logger.info({ atendente_id: candidate.atendente_id, oauth_cal: candOAuthCalId }, "Atendente ocupado no Google Calendar, pulando.");
+              continue;
             }
 
             resolvedAttendant = candidate;
-            realGoogleCalendarId = candGCalId;
+            realGoogleCalendarId = candOAuthCalId;
             break;
           }
 
@@ -1089,8 +1129,24 @@ Confirma este agendamento?
           }
 
           // Insert into public.agendamentos
-          const nomeUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).nome_completo as string || (conversationState.dados_coletados as Record<string, unknown>).nome as string : conversa?.nome_usuario;
-          const emailUsr = conversationState.dados_coletados ? (conversationState.dados_coletados as Record<string, unknown>).email as string : conversa?.email_usuario;
+          const dadosColetados = conversationState.dados_coletados as Record<string, unknown> | undefined;
+          const nomeUsr = (dadosColetados?.nome_completo as string)
+            || (dadosColetados?.nome as string)
+            || conversa?.nome_usuario
+            || body.user?.name
+            || "N\u00e3o informado";
+          const emailUsr = (dadosColetados?.email as string)
+            || conversa?.email_usuario
+            || body.user?.email
+            || "nao_informado@agendamento.local";
+
+          logger.info({
+            atendente_id: resolvedAttendant.atendente_id,
+            atendente_nome: resolvedAttendant.atendente_nome,
+            oauth_calendar_id: realGoogleCalendarId,
+            inicio: selectedSlot.inicio,
+            fim: selectedSlot.fim,
+          }, "Resolved attendant for booking");
 
           const agendamentoData: Record<string, unknown> = {
             setor_id: setor.id,
@@ -1115,8 +1171,8 @@ Confirma este agendamento?
             .single();
 
           if (insertErr || !agendamento) {
-            logger.error({ err: insertErr }, "Failed to insert local agendamento");
-            const reason = "Ocorreu um erro ao registrar seu agendamento. Tente novamente.";
+            logger.error({ err: insertErr?.message, code: insertErr?.code, details: insertErr?.details }, "Failed to insert local agendamento");
+            const reason = "Erro ao salvar agendamento no banco. Tente novamente.";
             return new Response(JSON.stringify({
               reply: reason,
               conversation_id: conversaId ?? body.session_id,
@@ -1125,18 +1181,23 @@ Confirma este agendamento?
             }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
 
-          // Call Google Calendar API
+          // Call Google Calendar API using the attendant's OAuth calendar
           let gcalStatus = "erro_google_calendar";
           let gcalEventId = null;
 
           if (realGoogleCalendarId) {
             const servicoNome = availability_context?.servico?.nome ?? "Serviço";
             
-            // Collect unique attendees
+            // Collect unique attendees (exclude the attendant — they are the organizer)
             const attendeesSet = new Set<string>();
-            if (emailUsr) attendeesSet.add(emailUsr);
-            if (resolvedAttendant.atendente_email) attendeesSet.add(resolvedAttendant.atendente_email);
+            if (emailUsr && emailUsr !== "nao_informado@agendamento.local") attendeesSet.add(emailUsr);
             
+            logger.info({
+              agendamento_id: agendamento.id,
+              atendente_id: resolvedAttendant.atendente_id,
+              calendarId: realGoogleCalendarId,
+            }, "Creating Google Calendar event");
+
             const gcalResponse = await createCalendarEvent({
               atendente_id: resolvedAttendant.atendente_id,
               calendarId: realGoogleCalendarId,
@@ -1152,9 +1213,13 @@ Confirma este agendamento?
             if (gcalResponse.eventId) {
               gcalStatus = "confirmado";
               gcalEventId = gcalResponse.eventId;
+              logger.info({ agendamento_id: agendamento.id, google_event_id: gcalEventId }, "Google Calendar event created successfully");
+            } else {
+              logger.warn({ agendamento_id: agendamento.id, gcalError: gcalResponse.error }, "Failed to create Google Calendar event");
             }
           } else {
-            logger.warn({ agendamento_id: agendamento.id }, "No real google_calendar_id found, leaving pending.");
+            logger.warn({ agendamento_id: agendamento.id, atendente_id: resolvedAttendant.atendente_id }, "No OAuth calendar_id resolved for attendant, saving as confirmado_localmente.");
+            gcalStatus = "confirmado_localmente";
           }
 
           // Update local status
@@ -1173,9 +1238,12 @@ Confirma este agendamento?
           let replyText = `Agendamento confirmado com sucesso para ${dia} às ${hora}!`;
           let nextEtapa = "agendamento_confirmado";
 
-          if (gcalStatus !== "confirmado") {
-            replyText = "Recebi sua solicitação, mas não consegui concluir a confirmação no calendário neste momento. Nossa equipe poderá verificar ou você pode tentar novamente em instantes.";
+          if (gcalStatus === "erro_google_calendar") {
+            replyText = "Não foi possível criar evento no Google Calendar. Seu agendamento foi salvo localmente e nossa equipe poderá verificar.";
             nextEtapa = "erro_confirmacao_agendamento";
+          } else if (gcalStatus === "confirmado_localmente") {
+            replyText = `Agendamento registrado para ${dia} às ${hora}. Não encontrei conexão Google ativa para o atendente, mas seu agendamento está salvo.`;
+            nextEtapa = "agendamento_confirmado";
           }
 
           const newState: Record<string, unknown> = {
