@@ -517,6 +517,42 @@ interface Slot {
 }
 
 /**
+ * BRT timezone helpers.
+ * Edge Functions run in UTC. janelas_atendimento hours are in BRT (UTC-3).
+ * America/Sao_Paulo has no DST since 2019.
+ */
+const SAO_PAULO_OFFSET_HOURS = 3;
+
+/** Build a Date for a given day + local BRT hour:minute, stored as UTC */
+function brtDateToUTC(dateBase: Date, hours: number, minutes: number): Date {
+  const d = new Date(dateBase);
+  d.setUTCHours(hours + SAO_PAULO_OFFSET_HOURS, minutes, 0, 0);
+  return d;
+}
+
+/** Get the day-of-week for a date in BRT timezone (0=Sun..6=Sat) */
+function getDayOfWeekBRT(date: Date): number {
+  const brt = new Date(date.getTime() - SAO_PAULO_OFFSET_HOURS * 3600000);
+  return brt.getUTCDay();
+}
+
+/** Format a UTC date as BRT HH:MM */
+function formatTimeBRT(date: Date): string {
+  let h = date.getUTCHours() - SAO_PAULO_OFFSET_HOURS;
+  if (h < 0) h += 24;
+  const m = date.getUTCMinutes();
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+}
+
+/** Format a UTC date as dd/MM in BRT */
+function formatDateBRT(date: Date): string {
+  const brt = new Date(date.getTime() - SAO_PAULO_OFFSET_HOURS * 3600000);
+  const d = String(brt.getUTCDate()).padStart(2, "0");
+  const mo = String(brt.getUTCMonth() + 1).padStart(2, "0");
+  return d + "/" + mo;
+}
+
+/**
  * Generate available time slots based on janelas_atendimento, excluding
  * exceptions and existing appointments. Pure computation — no Google Calendar.
  */
@@ -612,10 +648,10 @@ function generateAvailableSlots(
   for (let dayOffset = 0; dayOffset <= effectiveMaxDays && rawSlots.length < maxSlots * linkedAttendantIds.size; dayOffset++) {
     const date = new Date(now);
     date.setDate(date.getDate() + dayOffset);
-    date.setHours(0, 0, 0, 0);
+    date.setUTCHours(0, 0, 0, 0);
 
-    // JS getDay(): 0=Sunday ... 6=Saturday
-    const jsDow = date.getDay();
+    // Get day-of-week in BRT timezone (0=Sunday ... 6=Saturday)
+    const jsDow = getDayOfWeekBRT(date);
 
     // Find matching janelas for this day of week
     // janelas_atendimento.dia_semana: check both conventions (0=Sun or 1=Mon)
@@ -640,11 +676,9 @@ function generateAvailableSlots(
       const [startH, startM] = (j.hora_inicio as string).split(":").map(Number);
       const [endH, endM] = (j.hora_fim as string).split(":").map(Number);
 
-      const windowStart = new Date(date);
-      windowStart.setHours(startH, startM, 0, 0);
-
-      const windowEnd = new Date(date);
-      windowEnd.setHours(endH, endM, 0, 0);
+      // Convert BRT local times to UTC timestamps
+      const windowStart = brtDateToUTC(date, startH, startM);
+      const windowEnd = brtDateToUTC(date, endH, endM);
 
       for (const atendenteId of targetAttendants) {
         let cursor = new Date(windowStart);
@@ -711,14 +745,17 @@ function formatSlotsMessage(slots: Slot[]): string {
     return "Não encontrei horários disponíveis nos próximos dias. Tente novamente mais tarde ou entre em contato com o setor.";
   }
 
+  const diasSemana = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
   const lines = ["Encontrei estes horários disponíveis:\n"];
   for (const slot of slots) {
     const dt = new Date(slot.inicio);
-    const dia = dt.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
-    const horaInicio = dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
     const dtFim = new Date(slot.fim);
-    const horaFim = dtFim.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-    lines.push(`${slot.id}. ${dia} — ${horaInicio} às ${horaFim}`);
+    const dia = formatDateBRT(dt);
+    const horaInicio = formatTimeBRT(dt);
+    const horaFim = formatTimeBRT(dtFim);
+    const dow = getDayOfWeekBRT(dt);
+    const diaSemana = diasSemana[dow] || "";
+    lines.push(slot.id + ". " + dia + " — " + horaInicio + " às " + horaFim + " (" + diaSemana + ")");
   }
   lines.push("\nDigite o número do horário desejado.");
   return lines.join("\n");
