@@ -273,3 +273,14 @@ export async function saveAttendantWithServices(attendant: any, serviceIds: stri
   return { data, error: null };
 }
 
+export async function getKnowledgeBaseBySector(setorIds: string[]) {
+  if (setorIds.length === 0) return { data: [], error: null };
+  const { data, error } = await db
+    .from("base_conhecimento_agente")
+    .select("*")
+    .in("setor_id", setorIds)
+    .order("ordem", { ascending: true, nullsFirst: false })
+    .order("titulo", { ascending: true });
+  return { data: data ?? [], error: toErr(error) };
+}
+

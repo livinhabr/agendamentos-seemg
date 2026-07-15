@@ -187,6 +187,36 @@ function ErrorDetails({ err }: { err: NonNullable<PgErr> }) {
   );
 }
 
+/**
+ * Converts a full ISO-8601 datetime string (e.g. "2026-07-14T15:00:00+00:00")
+ * into the "YYYY-MM-DDTHH:MM" format that <input type="datetime-local"> expects,
+ * using the user's local timezone (browser default).
+ */
+function toDatetimeLocalValue(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return typeof iso === "string" ? iso : "";
+  // Build local YYYY-MM-DDTHH:MM
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * Prepare row values for the form: convert datetime-local fields from ISO to
+ * the format the browser input expects, and normalise null selects to "".
+ */
+function prepareRowForForm(row: Record<string, any>, fields: FieldDef[]): Record<string, any> {
+  const prepared = { ...row };
+  for (const f of fields) {
+    if (f.type === "datetime-local") {
+      prepared[f.name] = toDatetimeLocalValue(prepared[f.name]);
+    } else if (f.type === "select" && prepared[f.name] === null) {
+      prepared[f.name] = "";
+    }
+  }
+  return prepared;
+}
+
 export function FormModal({
   title,
   fields,
@@ -202,7 +232,7 @@ export function FormModal({
   onSave: (row: Record<string, any>) => Promise<string | null>;
   renderFormExtra?: (row: Record<string, any>) => ReactNode;
 }) {
-  const [values, setValues] = useState<Record<string, any>>({ ...row });
+  const [values, setValues] = useState<Record<string, any>>(() => prepareRowForForm(row, fields));
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const isDev = import.meta.env.DEV;

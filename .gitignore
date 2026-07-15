@@ -42,3 +42,4 @@ backend/.env
 
 backend/.env.local
 supabase/.env
+supabase/.env.local

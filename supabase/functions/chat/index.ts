@@ -821,7 +821,7 @@ export default {
       }
 
       // ── Fetch supplementary context (safe – never breaks the route) ──
-      const [servicos, perguntas_respostas, campos_chat, atendentes] = await Promise.all([
+      const [servicos, perguntas_respostas, campos_chat, atendentes, base_conhecimento] = await Promise.all([
         // 1. Serviços ativos do setor (vinculados ao bot atual ou sem vínculo de bot)
         safeQuery("servicos_agendamento", () =>
           supabaseAdmin
@@ -863,6 +863,17 @@ export default {
             .select("id, nome, email, cargo")
             .eq("setor_id", setor.id)
             .eq("ativo", true),
+          logger,
+        ),
+
+        // 5. Base de conhecimento ativa do setor
+        safeQuery("base_conhecimento_agente", () =>
+          supabaseAdmin
+            .from("base_conhecimento_agente")
+            .select("id, titulo, pergunta, resposta, agendavel, link_acesso, instrucoes_agente, documento_url, documento_nome, servico_id, fonte_tipo")
+            .eq("setor_id", setor.id)
+            .eq("ativo", true)
+            .order("ordem", { ascending: true }),
           logger,
         ),
       ]);
@@ -1398,6 +1409,7 @@ Confirma este agendamento?
           perguntas_respostas,
           campos_chat,
           atendentes,
+          base_conhecimento,
         },
         availability_context,
         request_meta: {
