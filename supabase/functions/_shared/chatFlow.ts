@@ -6,6 +6,9 @@ export interface ConversationState extends Record<string, unknown> {
   current_parent_id?: string | null;
   servico_id?: string;
   servico_nome?: string;
+  servico_sugerido_id?: string;
+  servico_sugerido_nome?: string;
+  aguardando_confirmacao_agendamento?: boolean;
   dados_coletados?: {
     nome?: string;
     nome_completo?: string;
@@ -82,6 +85,9 @@ export async function processChatFlow(
     delete newState.current_parent_id;
     delete newState.servico_id;
     delete newState.servico_nome;
+    delete newState.servico_sugerido_id;
+    delete newState.servico_sugerido_nome;
+    delete newState.aguardando_confirmacao_agendamento;
     delete newState.dados_coletados;
   }
 
@@ -91,6 +97,49 @@ export async function processChatFlow(
     .sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
 
   if (etapa === "inicio") {
+    // ── Check if user is confirming a suggested schedulable service ──
+    if (state.aguardando_confirmacao_agendamento && state.servico_sugerido_id) {
+      const confirmWords = ["sim", "quero", "quero agendar", "sim quero agendar", "pode agendar", "quero marcar", "quero marcar horario", "quero marcar horário", "agendar", "ok", "pode ser", "vamos", "bora"];
+      const negWords = ["nao", "não", "nope", "agora nao", "agora não", "depois", "talvez"];
+
+      if (negWords.some((w) => lowerMsg === w || lowerMsg.startsWith(w))) {
+        // User declined — clear suggestion, stay in inicio
+        delete newState.servico_sugerido_id;
+        delete newState.servico_sugerido_nome;
+        delete newState.aguardando_confirmacao_agendamento;
+        return {
+          reply: "Tudo bem! Se precisar de mais alguma informação ou quiser agendar depois, é só me chamar.",
+          conversation_state: newState,
+        };
+      }
+
+      if (confirmWords.some((w) => lowerMsg === w || lowerMsg.includes(w))) {
+        // User confirmed — start scheduling with the suggested service
+        newState.servico_id = state.servico_sugerido_id;
+        newState.servico_nome = state.servico_sugerido_nome;
+        delete newState.servico_sugerido_id;
+        delete newState.servico_sugerido_nome;
+        delete newState.aguardando_confirmacao_agendamento;
+
+        // If we already have the user's name, skip to email
+        if (newState.dados_coletados?.nome) {
+          newState.etapa = "pedindo_email";
+          return {
+            reply: `Claro! Vou agendar ${newState.servico_nome} para você, ${newState.dados_coletados.nome}.\n\nPor favor, informe seu e-mail para enviarmos a confirmação:`,
+            conversation_state: newState,
+          };
+        }
+
+        newState.etapa = "pedindo_nome";
+        return {
+          reply: `Claro! Vou agendar ${newState.servico_nome} para você.\n\nPara seguir, me informe seu nome completo:`,
+          conversation_state: newState,
+        };
+      }
+      // Not a clear confirm/deny — clear the suggestion flag and let AI handle normally
+      delete newState.aguardando_confirmacao_agendamento;
+    }
+
     // ── AI-powered response using knowledge base ──────────────────────
     if (lowerMsg !== "oi" && lowerMsg !== "ola" && lowerMsg !== "olá") {
       // Filter KB entries that have processed documents
@@ -163,8 +212,22 @@ export async function processChatFlow(
             finalReply += `\n\nVocê também pode consultar: ${aiResult.link_acesso}`;
           }
 
-          // If content is schedulable and the AI didn't already ask
+          // If content is schedulable, save suggestion in state and offer scheduling
           if (
+            aiResult.agendavel &&
+            aiResult.intent !== "nao_encontrado" &&
+            aiResult.servico_id
+          ) {
+            const svcName = servicosMap[aiResult.servico_id] || "este serviço";
+            newState.servico_sugerido_id = aiResult.servico_id;
+            newState.servico_sugerido_nome = svcName;
+            newState.aguardando_confirmacao_agendamento = true;
+
+            if (!finalReply.includes("agendar")) {
+              finalReply +=
+                "\n\nDeseja agendar um atendimento sobre esse assunto?";
+            }
+          } else if (
             aiResult.agendavel &&
             aiResult.intent !== "nao_encontrado" &&
             !finalReply.includes("agendar")
@@ -191,12 +254,18 @@ export async function processChatFlow(
       nome,
       nome_completo: nome,
     };
-    newState.etapa = "escolhendo_servico";
 
-    reply = `Muito prazer, ${nome}! Como posso ajudar você hoje?\n\nEscolha uma das opções abaixo digitando o número correspondente:\n`;
-    rootServices.forEach((s, idx) => {
-      reply += `${idx + 1}. ${s.nome}\n`;
-    });
+    // If service is already pre-selected (e.g. from AI suggestion), skip service selection
+    if (newState.servico_id) {
+      newState.etapa = "pedindo_email";
+      reply = `Muito prazer, ${nome}! Para podermos enviar as confirmações do agendamento de ${newState.servico_nome || "seu atendimento"}, por favor, informe seu e-mail:`;
+    } else {
+      newState.etapa = "escolhendo_servico";
+      reply = `Muito prazer, ${nome}! Como posso ajudar você hoje?\n\nEscolha uma das opções abaixo digitando o número correspondente:\n`;
+      rootServices.forEach((s, idx) => {
+        reply += `${idx + 1}. ${s.nome}\n`;
+      });
+    }
   } else if (etapa === "escolhendo_servico") {
     const currentParentId = state.current_parent_id || null;
     const currentOptions = context.servicos
