@@ -9,6 +9,11 @@ export interface ConversationState extends Record<string, unknown> {
   servico_sugerido_id?: string;
   servico_sugerido_nome?: string;
   aguardando_confirmacao_agendamento?: boolean;
+  // Contexto do atendimento informativo (Q&A com documento)
+  kb_contexto_servico_id?: string;
+  kb_contexto_titulo?: string;
+  kb_contexto_agendavel?: boolean;
+  kb_contexto_link?: string;
   dados_coletados?: {
     nome?: string;
     nome_completo?: string;
@@ -88,6 +93,10 @@ export async function processChatFlow(
     delete newState.servico_sugerido_id;
     delete newState.servico_sugerido_nome;
     delete newState.aguardando_confirmacao_agendamento;
+    delete newState.kb_contexto_servico_id;
+    delete newState.kb_contexto_titulo;
+    delete newState.kb_contexto_agendavel;
+    delete newState.kb_contexto_link;
     delete newState.dados_coletados;
   }
 
@@ -212,33 +221,33 @@ export async function processChatFlow(
             finalReply += `\n\nVocê também pode consultar: ${aiResult.link_acesso}`;
           }
 
-          // If content is schedulable, save suggestion in state and offer scheduling
-          if (
-            aiResult.agendavel &&
-            aiResult.intent !== "nao_encontrado" &&
-            aiResult.servico_id
-          ) {
+          // If AI identified a specific service, transition to informative Q&A
+          if (aiResult.intent !== "nao_encontrado" && aiResult.servico_id) {
             const svcName = servicosMap[aiResult.servico_id] || "este serviço";
-            newState.servico_sugerido_id = aiResult.servico_id;
-            newState.servico_sugerido_nome = svcName;
-            newState.aguardando_confirmacao_agendamento = true;
+            newState.kb_contexto_servico_id = aiResult.servico_id;
+            newState.kb_contexto_titulo = svcName;
+            newState.kb_contexto_agendavel = !!aiResult.agendavel;
+            newState.kb_contexto_link = aiResult.link_acesso || undefined;
+            newState.etapa = "atendimento_informativo";
 
-            if (!finalReply.includes("agendar")) {
-              finalReply +=
-                "\n\nDeseja agendar um atendimento sobre esse assunto?";
+            if (aiResult.agendavel) {
+              finalReply += "\n\nTem alguma dúvida sobre esse assunto? Se preferir, posso agendar um atendimento para você.";
+            } else {
+              finalReply += "\n\nTem alguma dúvida sobre esse assunto?";
             }
           } else if (
             aiResult.agendavel &&
             aiResult.intent !== "nao_encontrado" &&
             !finalReply.includes("agendar")
           ) {
+            // agendavel but no servico_id — fallback
             finalReply +=
               "\n\nDeseja agendar um atendimento sobre esse assunto?";
           }
 
           return {
             reply: finalReply,
-            conversation_state: newState, // stays in inicio
+            conversation_state: newState,
           };
         }
       }
@@ -348,6 +357,129 @@ export async function processChatFlow(
       reply =
         "Opção inválida. Digite 1 para prosseguir ou 2 para corrigir os dados.";
     }
+  } else if (etapa === "atendimento_informativo") {
+    // ── Conversational Q&A using the specific document ────────────────
+    const scheduleWords = ["quero agendar", "pode agendar", "agendar", "quero marcar", "marcar horario", "marcar horário"];
+    const doneWords = ["obrigado", "obrigada", "valeu", "é isso", "e isso", "era isso", "era só isso", "so isso", "só isso", "nao tenho", "não tenho", "sem duvida", "sem dúvida", "tudo certo", "ok obrigado", "ok obrigada"];
+
+    // Check if user wants to schedule (only if service is schedulable)
+    if (
+      state.kb_contexto_agendavel &&
+      state.kb_contexto_servico_id &&
+      scheduleWords.some((w) => lowerMsg.includes(w))
+    ) {
+      newState.servico_id = state.kb_contexto_servico_id;
+      newState.servico_nome = state.kb_contexto_titulo;
+      delete newState.kb_contexto_servico_id;
+      delete newState.kb_contexto_titulo;
+      delete newState.kb_contexto_agendavel;
+      delete newState.kb_contexto_link;
+
+      if (newState.dados_coletados?.nome) {
+        newState.etapa = "pedindo_email";
+        return {
+          reply: `Claro! Vou agendar ${newState.servico_nome} para você, ${newState.dados_coletados.nome}.\n\nPor favor, informe seu e-mail para enviarmos a confirmação:`,
+          conversation_state: newState,
+        };
+      }
+
+      newState.etapa = "pedindo_nome";
+      return {
+        reply: `Claro! Vou agendar ${newState.servico_nome} para você.\n\nPara seguir, me informe seu nome completo:`,
+        conversation_state: newState,
+      };
+    }
+
+    // Check if user is done / satisfied
+    if (
+      doneWords.some((w) => lowerMsg === w || lowerMsg.includes(w)) ||
+      (lowerMsg === "nao" || lowerMsg === "não")
+    ) {
+      delete newState.kb_contexto_servico_id;
+      delete newState.kb_contexto_titulo;
+      delete newState.kb_contexto_agendavel;
+      delete newState.kb_contexto_link;
+      newState.etapa = "inicio";
+      return {
+        reply: "De nada! Se precisar de mais alguma informação ou quiser agendar um atendimento, é só me chamar. 😊",
+        conversation_state: newState,
+      };
+    }
+
+    // Answer the follow-up question using the specific document
+    const kbEntry = (context.base_conhecimento ?? []).find(
+      (e) => e.servico_id === state.kb_contexto_servico_id &&
+             e.documento_status === "processado" &&
+             e.documento_texto_extraido,
+    );
+
+    if (kbEntry) {
+      // Build service name mapping
+      const servicosMap: Record<string, string> = {};
+      for (const svc of context.servicos) {
+        if (svc.id && svc.nome) servicosMap[svc.id] = svc.nome;
+      }
+
+      const aiResult = await askKnowledgeBaseOpenAI(
+        userMsg,
+        [kbEntry],  // Only the relevant document
+        servicosMap,
+        null,  // No FAQ in follow-up mode
+        logger,
+        {
+          nome: context.bot.nome as string | undefined,
+          tom_de_voz: context.bot.tom_de_voz as string | undefined,
+          saudacao_inicial: context.bot.saudacao_inicial as string | undefined,
+        },
+        context.setor ? { nome: context.setor.nome } : undefined,
+      );
+
+      if (aiResult.answered && aiResult.reply) {
+        let followUpReply = aiResult.reply;
+
+        // If user explicitly asks to schedule within their question
+        if (aiResult.intent === "agendamento" && state.kb_contexto_agendavel) {
+          newState.servico_id = state.kb_contexto_servico_id;
+          newState.servico_nome = state.kb_contexto_titulo;
+          delete newState.kb_contexto_servico_id;
+          delete newState.kb_contexto_titulo;
+          delete newState.kb_contexto_agendavel;
+          delete newState.kb_contexto_link;
+          newState.etapa = "pedindo_nome";
+          return {
+            reply: `${followUpReply}\n\nPara agendar, preciso de algumas informações. Qual é o seu nome?`,
+            conversation_state: newState,
+          };
+        }
+
+        // Continue in informative Q&A
+        if (state.kb_contexto_agendavel) {
+          followUpReply += "\n\nTem mais alguma dúvida ou deseja agendar um atendimento?";
+        } else {
+          followUpReply += "\n\nTem mais alguma dúvida sobre esse assunto?";
+        }
+        return {
+          reply: followUpReply,
+          conversation_state: newState,
+        };
+      }
+    }
+
+    // Couldn't answer from the specific document
+    const topicName = state.kb_contexto_titulo || "este assunto";
+    let cantAnswerReply = `Não encontrei essa informação específica no documento sobre ${topicName}.`;
+    if (state.kb_contexto_agendavel) {
+      cantAnswerReply += " Posso agendar um atendimento para que você tire essa dúvida diretamente. Deseja agendar?";
+    } else {
+      cantAnswerReply += " Tem outra pergunta que eu possa ajudar?";
+      if (state.kb_contexto_link) {
+        cantAnswerReply += `\n\nVocê também pode consultar: ${state.kb_contexto_link}`;
+      }
+    }
+    return {
+      reply: cantAnswerReply,
+      conversation_state: newState,
+    };
   } else {
     reply =
       "Não entendi sua resposta ou estamos em um estado inválido. Por favor, digite 'oi' para recomeçar.";
