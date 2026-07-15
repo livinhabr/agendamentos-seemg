@@ -908,8 +908,8 @@ function ExcecoesTab() {
               const fmt = (iso: string) => {
                 if (!iso) return "—";
                 const d = new Date(iso);
-                return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })
-                  + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+                return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "America/Sao_Paulo" })
+                  + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" });
               };
               return (
                 <span className="text-xs whitespace-nowrap">
@@ -924,6 +924,18 @@ function ExcecoesTab() {
         loading={excecoes.loading}
         error={excecoes.error}
         baseRow={{ setor_id: selectedSectorId }}
+        onSave={async (row) => {
+          const toSave = { ...row };
+          // datetime-local gives "2026-07-17T15:32" without timezone.
+          // Append São Paulo offset so Supabase stores the correct UTC value.
+          if (toSave.data_inicio && !toSave.data_inicio.includes("+") && !toSave.data_inicio.includes("-03:00")) {
+            toSave.data_inicio = toSave.data_inicio + ":00-03:00";
+          }
+          if (toSave.data_fim && !toSave.data_fim.includes("+") && !toSave.data_fim.includes("-03:00")) {
+            toSave.data_fim = toSave.data_fim + ":00-03:00";
+          }
+          return await upsertRow("excecoes_atendimento", toSave);
+        }}
         onChanged={excecoes.reload}
       />
     </Section>
