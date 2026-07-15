@@ -1,17 +1,29 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { PortalLayout, PageHeader, Section } from "@/components/portal/PortalLayout";
 import { useSector } from "@/lib/context/SectorContext";
 import { Button } from "@/components/ui/button";
 import { supabase, SUPABASE_URL } from "@/integrations/supabase/client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { useResource } from "@/lib/hooks/useResource";
 import {
   getKnowledgeBaseBySector,
   getServicesBySector,
+  getPublicationChecklistData,
+  updateBotPublicationStatus,
   upsertRow,
   deleteRow,
 } from "@/lib/data/agenda";
+import type { PublicationChecklist } from "@/lib/data/agenda";
 import {
   Loader2,
   Plus,
@@ -30,6 +42,18 @@ import {
   AlertCircle,
   Clock,
   X,
+  ClipboardCheck,
+  Send,
+  Shield,
+  AlertTriangle,
+  Users,
+  Bot,
+  Building2,
+  CalendarClock,
+  FileCheck,
+  MonitorPlay,
+  TestTube2,
+  Eye,
 } from "lucide-react";
 
 export const Route = createFileRoute("/configuracoes")({
@@ -50,7 +74,7 @@ function ConfigPage() {
   const { userId, userEmail, sectors, bots, selectedSectorId, selectedBotId } = useSector();
   const sector = sectors.find((s) => s.id === selectedSectorId);
   const bot = bots.find((b) => b.id === selectedBotId);
-  const isDev = import.meta.env.DEV;
+  const showDebug = import.meta.env.VITE_SHOW_DEBUG === "true";
 
   async function signOut() {
     await supabase.auth.signOut();
@@ -59,13 +83,14 @@ function ConfigPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-4">
-      <PageHeader title="Configurações" description="Conta e base de conhecimento do agente." />
+      <PageHeader title="Configurações" description="Conta, base de conhecimento e revisão para publicação." />
 
       <Tabs defaultValue="base-agente">
         <TabsList className="flex w-full flex-wrap">
           <TabsTrigger value="base-agente">Base do agente</TabsTrigger>
           <TabsTrigger value="conta">Conta</TabsTrigger>
-          {isDev && <TabsTrigger value="debug">Debug</TabsTrigger>}
+          <TabsTrigger value="revisao">Revisão e publicação</TabsTrigger>
+          {showDebug && <TabsTrigger value="debug">Debug</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="base-agente">
@@ -75,7 +100,6 @@ function ConfigPage() {
         <TabsContent value="conta" className="space-y-4">
           <Section title="Usuário logado">
             <p className="text-sm"><span className="font-medium">E-mail:</span> {userEmail}</p>
-            <p className="text-sm"><span className="font-medium">ID:</span> <span className="font-mono text-xs">{userId}</span></p>
           </Section>
           <Section title="Setor atual">
             <p className="text-sm"><span className="font-medium">Nome:</span> {sector?.nome ?? "—"}</p>
@@ -90,7 +114,11 @@ function ConfigPage() {
           </div>
         </TabsContent>
 
-        {isDev && (
+        <TabsContent value="revisao">
+          <RevisaoPublicacaoTab />
+        </TabsContent>
+
+        {showDebug && (
           <TabsContent value="debug">
             <Section title="Debug (apenas desenvolvimento)">
               <pre className="overflow-x-auto rounded bg-muted p-3 text-[11px]">
@@ -100,6 +128,442 @@ function ConfigPage() {
           </TabsContent>
         )}
       </Tabs>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Revisão e publicação Tab
+   ═══════════════════════════════════════════════════════════════════════ */
+
+type CheckItemStatus = "concluido" | "pendente" | "atencao";
+
+type CheckItem = {
+  label: string;
+  status: CheckItemStatus;
+  detail?: string;
+  icon: React.ElementType;
+  critical?: boolean;
+};
+
+function buildChecklist(
+  cl: PublicationChecklist,
+  sectorName: string | undefined,
+): CheckItem[] {
+  const items: CheckItem[] = [];
+
+  // 1. Dados do setor
+  items.push({
+    label: "Dados do setor preenchidos",
+    status: sectorName ? "concluido" : "pendente",
+    detail: sectorName ? `Setor: ${sectorName}` : "Setor sem nome",
+    icon: Building2,
+  });
+
+  // 2. Serviços cadastrados
+  items.push({
+    label: "Serviços cadastrados",
+    status: cl.servicosAtivos > 0 ? "concluido" : "pendente",
+    detail: cl.servicosAtivos > 0 ? `${cl.servicosAtivos} serviço(s) ativo(s)` : "Nenhum serviço ativo",
+    icon: ClipboardCheck,
+    critical: cl.servicosAtivos === 0,
+  });
+
+  // 3. Base do agente configurada
+  items.push({
+    label: "Base do agente configurada",
+    status: cl.basesAtivas > 0 ? "concluido" : "pendente",
+    detail: cl.basesAtivas > 0 ? `${cl.basesAtivas} base(s) ativa(s)` : "Nenhuma base configurada",
+    icon: BookOpen,
+    critical: cl.basesAtivas === 0,
+  });
+
+  // 4. Documentos do agente
+  const allDocsOk = cl.basesAtivas > 0 && cl.docsPendentes === 0;
+  const someDocsPending = cl.basesAtivas > 0 && cl.docsPendentes > 0;
+  items.push({
+    label: "Documentos do agente enviados/processados",
+    status: allDocsOk ? "concluido" : someDocsPending ? "atencao" : "pendente",
+    detail: cl.basesAtivas > 0
+      ? `${cl.docsProcessados} processado(s), ${cl.docsPendentes} pendente(s)`
+      : "Nenhum documento cadastrado",
+    icon: FileCheck,
+  });
+
+  // 5. Atendentes
+  items.push({
+    label: "Atendentes cadastrados",
+    status: cl.atendentesAtivos > 0 ? "concluido" : "pendente",
+    detail: cl.atendentesAtivos > 0
+      ? `${cl.atendentesAtivos} atendente(s) ativo(s)`
+      : "Nenhum atendente ativo",
+    icon: Users,
+    critical: cl.atendentesAtivos === 0,
+  });
+
+  // 6. Google Calendar
+  const allHaveGoogle = cl.atendentesAtivos > 0 && cl.atendentesComGoogle === cl.atendentesAtivos;
+  const someHaveGoogle = cl.atendentesAtivos > 0 && cl.atendentesComGoogle > 0 && cl.atendentesComGoogle < cl.atendentesAtivos;
+  items.push({
+    label: "Google Calendar conectado aos atendentes",
+    status: allHaveGoogle ? "concluido" : someHaveGoogle ? "atencao" : "pendente",
+    detail: cl.atendentesAtivos > 0
+      ? `${cl.atendentesComGoogle} de ${cl.atendentesAtivos} conectado(s)`
+      : "Nenhum atendente para conectar",
+    icon: Calendar,
+  });
+
+  // 7. Horários e pausas
+  items.push({
+    label: "Horários e pausas configurados",
+    status: cl.horariosAtivos > 0 ? "concluido" : "pendente",
+    detail: cl.horariosAtivos > 0
+      ? `${cl.horariosAtivos} janela(s) de atendimento`
+      : "Nenhum horário configurado",
+    icon: CalendarClock,
+    critical: cl.horariosAtivos === 0,
+  });
+
+  // 8. Exceções
+  items.push({
+    label: "Exceções cadastradas, se houver",
+    status: "concluido",
+    detail: cl.excecoesCount > 0
+      ? `${cl.excecoesCount} exceção(ões) cadastrada(s)`
+      : "Nenhuma exceção (opcional)",
+    icon: AlertTriangle,
+  });
+
+  // 9–11. Manual items
+  items.push({
+    label: "Preview do chat testado",
+    status: "pendente",
+    detail: "Verificação manual",
+    icon: MonitorPlay,
+  });
+
+  items.push({
+    label: "Agendamentos testados",
+    status: "pendente",
+    detail: "Verificação manual",
+    icon: TestTube2,
+  });
+
+  items.push({
+    label: "Publicação revisada",
+    status: "pendente",
+    detail: "Verificação manual",
+    icon: Eye,
+  });
+
+  return items;
+}
+
+function getOverallStatus(cl: PublicationChecklist): {
+  label: string;
+  color: string;
+  bgColor: string;
+  borderColor: string;
+} {
+  if (cl.statusPublicacao === "publicado")
+    return { label: "Publicado", color: "text-emerald-700", bgColor: "bg-emerald-50", borderColor: "border-emerald-200" };
+  if (cl.statusPublicacao === "aprovado")
+    return { label: "Aprovado", color: "text-blue-700", bgColor: "bg-blue-50", borderColor: "border-blue-200" };
+  if (cl.statusPublicacao === "em_revisao")
+    return { label: "Em revisão", color: "text-amber-700", bgColor: "bg-amber-50", borderColor: "border-amber-200" };
+
+  const hasCritical =
+    cl.servicosAtivos === 0 ||
+    cl.basesAtivas === 0 ||
+    cl.atendentesAtivos === 0 ||
+    cl.horariosAtivos === 0 ||
+    !cl.botAtivo;
+
+  if (hasCritical)
+    return { label: "Em configuração", color: "text-gray-700", bgColor: "bg-gray-50", borderColor: "border-gray-200" };
+  return { label: "Pronto para revisão", color: "text-emerald-700", bgColor: "bg-emerald-50", borderColor: "border-emerald-200" };
+}
+
+function getCriticalPendencies(cl: PublicationChecklist): string[] {
+  const p: string[] = [];
+  if (cl.servicosAtivos === 0) p.push("Nenhum serviço ativo");
+  if (cl.basesAtivas === 0) p.push("Nenhuma base do agente configurada");
+  if (cl.atendentesAtivos === 0) p.push("Nenhum atendente ativo");
+  if (cl.horariosAtivos === 0) p.push("Nenhum horário configurado");
+  if (!cl.botAtivo) p.push("Bot inativo");
+  return p;
+}
+
+const statusConfig = {
+  concluido: {
+    icon: CheckCircle2,
+    color: "text-emerald-600",
+    bg: "bg-emerald-50",
+    border: "border-emerald-200",
+    label: "Concluído",
+  },
+  pendente: {
+    icon: Clock,
+    color: "text-gray-500",
+    bg: "bg-gray-50",
+    border: "border-gray-200",
+    label: "Pendente",
+  },
+  atencao: {
+    icon: AlertCircle,
+    color: "text-amber-600",
+    bg: "bg-amber-50",
+    border: "border-amber-200",
+    label: "Atenção",
+  },
+} as const;
+
+function RevisaoPublicacaoTab() {
+  const { userId, sectors, bots, selectedSectorId, selectedBotId } = useSector();
+  const sector = sectors.find((s) => s.id === selectedSectorId);
+  const bot = bots.find((b) => b.id === selectedBotId);
+  const setorIds = selectedSectorId ? [selectedSectorId] : [];
+
+  const [checklist, setChecklist] = useState<PublicationChecklist | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const loadChecklist = useCallback(async () => {
+    setLoading(true);
+    const { data } = await getPublicationChecklistData(setorIds, selectedBotId);
+    setChecklist(data);
+    setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSectorId, selectedBotId]);
+
+  useEffect(() => {
+    void loadChecklist();
+  }, [loadChecklist]);
+
+  if (loading || !checklist) {
+    return (
+      <Section>
+        <div className="flex justify-center py-12">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        </div>
+      </Section>
+    );
+  }
+
+  const items = buildChecklist(checklist, sector?.nome);
+  const overallStatus = getOverallStatus(checklist);
+  const criticalPendencies = getCriticalPendencies(checklist);
+  const canSubmit = criticalPendencies.length === 0 && checklist.statusPublicacao === "rascunho";
+  const alreadySubmitted = checklist.statusPublicacao !== "rascunho";
+
+  const completedCount = items.filter((i) => i.status === "concluido").length;
+  const progressPct = Math.round((completedCount / items.length) * 100);
+
+  async function handleSubmit() {
+    if (!selectedBotId || !userId) return;
+    setSubmitting(true);
+    const { error } = await updateBotPublicationStatus(selectedBotId, userId);
+    setSubmitting(false);
+    setShowConfirmModal(false);
+    if (error) {
+      alert("Erro ao enviar para publicação: " + error.message);
+      return;
+    }
+    setSuccessMessage(
+      "Solicitação de publicação registrada. Após a revisão técnica, o chat poderá ser disponibilizado ao público.",
+    );
+    void loadChecklist();
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <Section>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <ClipboardCheck className="h-5 w-5 text-primary" />
+            <h2 className="text-base font-semibold text-foreground">
+              Revisão e publicação
+            </h2>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Confira se todas as informações do chat de agendamento foram preenchidas antes de enviar para publicação.
+          </p>
+        </div>
+      </Section>
+
+      {/* Success Message */}
+      {successMessage && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 flex items-start gap-2">
+          <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          <span>{successMessage}</span>
+        </div>
+      )}
+
+      {/* Summary */}
+      <Section title="Resumo do chat">
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-md border border-border p-3 text-center">
+              <Building2 className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Setor</p>
+              <p className="text-sm font-medium truncate">{sector?.nome ?? "—"}</p>
+            </div>
+            <div className="rounded-md border border-border p-3 text-center">
+              <Bot className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Bot</p>
+              <p className="text-sm font-medium truncate">{bot?.nome ?? "—"}</p>
+            </div>
+            <div className="rounded-md border border-border p-3 text-center">
+              <ClipboardCheck className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Serviços ativos</p>
+              <p className="text-lg font-bold">{checklist.servicosAtivos}</p>
+            </div>
+            <div className="rounded-md border border-border p-3 text-center">
+              <Users className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Atendentes ativos</p>
+              <p className="text-lg font-bold">{checklist.atendentesAtivos}</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div className="rounded-md border border-border p-3 text-center">
+              <BookOpen className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Bases do agente</p>
+              <p className="text-lg font-bold">{checklist.basesAtivas}</p>
+            </div>
+            <div className="rounded-md border border-border p-3 text-center">
+              <FileText className="mx-auto h-4 w-4 text-muted-foreground mb-1" />
+              <p className="text-[10px] uppercase text-muted-foreground">Docs processados</p>
+              <p className="text-lg font-bold">{checklist.docsProcessados}</p>
+            </div>
+            <div className="col-span-2 sm:col-span-1 rounded-md border p-3 text-center ${overallStatus.borderColor}">
+              <Shield className={`mx-auto h-4 w-4 mb-1 ${overallStatus.color}`} />
+              <p className="text-[10px] uppercase text-muted-foreground">Status geral</p>
+              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${overallStatus.color} ${overallStatus.bgColor} border ${overallStatus.borderColor}`}>
+                {overallStatus.label}
+              </span>
+            </div>
+          </div>
+        </div>
+      </Section>
+
+      {/* Progress */}
+      <Section>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Progresso do checklist</span>
+            <span className="font-medium">{completedCount} de {items.length} itens concluídos ({progressPct}%)</span>
+          </div>
+          <Progress value={progressPct} />
+        </div>
+      </Section>
+
+      {/* Checklist */}
+      <Section title="Checklist de prontidão">
+        <div className="space-y-1.5">
+          {items.map((item) => {
+            const cfg = statusConfig[item.status];
+            const StatusIcon = cfg.icon;
+            const ItemIcon = item.icon;
+            return (
+              <div
+                key={item.label}
+                className={`flex items-center gap-3 rounded-md border px-3 py-2.5 transition-colors ${cfg.border} ${cfg.bg}`}
+              >
+                <ItemIcon className={`h-4 w-4 flex-shrink-0 ${cfg.color}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-foreground">{item.label}</p>
+                  {item.detail && (
+                    <p className="text-[11px] text-muted-foreground truncate">{item.detail}</p>
+                  )}
+                </div>
+                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${cfg.color} ${cfg.bg} border ${cfg.border}`}>
+                  <StatusIcon className="h-2.5 w-2.5" />
+                  {cfg.label}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
+      {/* Pendencies warning */}
+      {criticalPendencies.length > 0 && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-red-800">
+                Antes de enviar para publicação, conclua os seguintes itens:
+              </p>
+              <ul className="mt-1.5 space-y-0.5">
+                {criticalPendencies.map((p) => (
+                  <li key={p} className="text-xs text-red-700 flex items-center gap-1">
+                    <span className="h-1 w-1 rounded-full bg-red-400 flex-shrink-0" />
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Submit button */}
+      <div className="flex justify-end">
+        {alreadySubmitted ? (
+          <div className={`inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium ${overallStatus.color} ${overallStatus.bgColor} border ${overallStatus.borderColor}`}>
+            <Shield className="h-4 w-4" />
+            {overallStatus.label}
+            {checklist.dataEnvioPublicacao && (
+              <span className="text-[10px] text-muted-foreground ml-1">
+                — Enviado em {new Date(checklist.dataEnvioPublicacao).toLocaleDateString("pt-BR")}
+              </span>
+            )}
+          </div>
+        ) : (
+          <Button
+            size="lg"
+            disabled={!canSubmit}
+            onClick={() => setShowConfirmModal(true)}
+            className="gap-2"
+          >
+            <Send className="h-4 w-4" />
+            Enviar para publicação
+          </Button>
+        )}
+      </div>
+
+      {/* Confirmation Modal */}
+      <Dialog open={showConfirmModal} onOpenChange={setShowConfirmModal}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Confirmar envio para publicação</DialogTitle>
+            <DialogDescription>
+              Ao confirmar, o chat de agendamento será enviado para revisão técnica.
+              Após a aprovação, ele poderá ser disponibilizado ao público.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span>Certifique-se de que o chat foi testado antes de enviar.</span>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowConfirmModal(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleSubmit} disabled={submitting} className="gap-2">
+              {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Confirmar envio
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
