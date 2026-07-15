@@ -870,7 +870,7 @@ export default {
         safeQuery("base_conhecimento_agente", () =>
           supabaseAdmin
             .from("base_conhecimento_agente")
-            .select("id, titulo, pergunta, resposta, agendavel, link_acesso, instrucoes_agente, documento_url, documento_nome, servico_id, fonte_tipo")
+            .select("id, titulo, pergunta, resposta, agendavel, link_acesso, instrucoes_agente, documento_url, documento_nome, documento_texto_extraido, documento_status, servico_id, fonte_tipo")
             .eq("setor_id", setor.id)
             .eq("ativo", true)
             .order("ordem", { ascending: true }),
